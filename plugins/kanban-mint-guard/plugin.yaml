@@ -1,0 +1,41 @@
+name: kanban-mint-guard
+version: 0.1.0
+kind: backend
+author: Claude (Cowork) for Richie, 2026-09-12
+description: >-
+  Mint-time assignee routing guard, as a PLUGIN rather than a core patch.
+
+  Replaces the reverted core change 14dace227 ("C1"), which put this lint inside
+  tools/kanban_tools.py and, in doing so, rewrote that file +3891/-1945, silently
+  dropped the charter-4 estimation code, and spawned three regression cards. The
+  behaviour was wanted; the location was not. Per the 2026-09-09 decision, policy
+  lives on upstream's hook surface and upstream's kanban stays the substrate.
+
+  The defect it closes: kanban_create passes `assignee` through verbatim and parks
+  only UNKNOWN names, so a real-but-wrong profile is accepted and dispatched.
+  Measured 2026-09-12: three mis-routings in one day (a build card to rodge, who
+  then heartbeat for 57 minutes doing nothing; a coding card to axel, who timed out
+  at 602s; an env card to axel again), against a 7-day baseline of 14.
+
+  kind: backend so it loads in every profile and every kanban worker. A user plugin
+  in ~/.hermes/plugins is invisible to workers — that is why the completion gate was
+  a silent no-op from 09-09 to 09-11.
+
+  Severity is deliberately split. It BLOCKS only contradictions that cannot be
+  legitimate, and leaves everything softer to scripts/fleet-watchdogs/assignee-mismatch-watch.py,
+  which flags rather than refuses:
+    1. a board-lane card (build / review / verify / deploy verb in the title)
+       assigned to axel, switch or brain — none of which is a board lane. Axel is
+       WeRoll-business-only per its SOUL; switch is the switchboard; brain takes
+       no cards at all.
+    2. an explicit owner marker in the title ("[Bob] ...", "Rodge — ...") naming a
+       different profile than `assignee`.
+    3. a build-lane title assigned to rodge, steve-o or karl — the cross-lane case
+       that produced the 57-minute dead run.
+
+  Escape hatch: put `assignee-override:` anywhere in the card body (with the reason)
+  and the guard stands down. Legitimate cross-lane cards exist; they should say so.
+
+  Fail-open by construction. No title, no assignee, an unknown name, a body it
+  cannot read, or any exception at all -> the card is created. A guard that guesses
+  is worse than no guard, and refusing to mint is how a board stops entirely.
