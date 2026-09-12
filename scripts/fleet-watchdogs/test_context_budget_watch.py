@@ -93,9 +93,23 @@ def test_total_is_caught_even_when_every_slot_passes():
 
 
 def test_root_gets_the_larger_budget():
-    m = _green_worker() | {"soul": 11000, "skills_index": 5000}
+    """Same measurements: fine for root, over budget for a worker."""
+    m = {"soul": 11000, "skills_index": 2000, "memory": 1000, "user": 900,
+         "ctx_cap": 60000, "growth_per_day": 0.0, "days_to_breach": None,
+         "soul_truncated": False}
+    assert sum(m[s] for s in cbw.SLOTS) <= cbw.BUDGETS["root"]["total"]
     assert cbw.evaluate("root", m) == []
     assert cbw.evaluate("bob", m) != []
+
+
+def test_roots_total_budget_still_binds():
+    """Root is not exempt — every slot inside its cap, the total is not."""
+    m = {"soul": 11900, "skills_index": 5900, "memory": 2100, "user": 1300,
+         "ctx_cap": 60000, "growth_per_day": 0.0, "days_to_breach": None,
+         "soul_truncated": False}
+    findings = cbw.evaluate("root", m)
+    assert not any(f.startswith(("soul ", "skills_index ", "memory ", "user ")) for f in findings)
+    assert any("TOTAL owned 21200 > 15000" in f for f in findings)
 
 
 def test_projected_breach_is_reported_before_it_happens():
