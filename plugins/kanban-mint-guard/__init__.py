@@ -43,6 +43,51 @@ LANE_PATTERNS = (
 OWNER_MARKER = re.compile(r"^\s*(?:\[(?P<b>[a-z][a-z0-9._-]{1,20})\]|(?P<c>[a-z][a-z0-9._-]{1,20})\s*[—–]\s)", re.I)
 
 KNOWN = frozenset({"bob", "rodge", "steve-o", "karl", "jobsy", "default", "axel", "switch", "brain"})
+
+# --- kernel-patch rule (2026-09-12) -----------------------------------------
+# Upstream's kanban is the SUBSTRATE. A card may not propose editing it.
+#
+# This rule is DELIBERATELY NARROW, and that is a design decision, not laziness.
+# Calibrating against the real bodies of 2026-09-12 showed prose cannot be
+# classified safely: the batch's ANCHOR card quotes `hermes_cli/kanban_decompose.py
+# ... rewrites only null/unknown` as a statement of existing behaviour, and another
+# card says `Both touch hermes_cli/kanban_db.py` about two OTHER cards. Blocking on
+# "a kernel path appears" would refuse both, and a guard that refuses correct cards
+# stops the board — worse than the defect.
+#
+# So this blocks only the unambiguous shape: a line that STARTS with an edit verb
+# and names a kernel path. Everything subtler is the job of
+# scripts/fleet-watchdogs/core-patch-watch.py, which reads COMMITS — ground truth,
+# no prose — and therefore catches what this cannot.
+KERNEL_DIRS = ("hermes_cli", "tools", "agent", "gateway")
+KERNEL_PATH = re.compile(
+    r"(?<![\w/])"                                                # not mid-path: a BackupBrain card
+                                                                 # saying backend/app/tools/x.py is
+                                                                 # not a kernel edit
+    r"(?:(?:" + "|".join(KERNEL_DIRS) + r")/[\w./-]*\.py"        # hermes_cli/kanban_db.py
+    r"|kanban_(?:db|tools|decompose|db_graph|db_dispatch)\w*\.py)",  # or the bare module
+    re.I)
+EDIT_VERB_LINE = re.compile(
+    r"^\s*(?:[-*+]\s*|\d+[.)]\s*|#+\s*)?(?:\*\*)?"
+    r"(patch|edit|modify|change|refactor|amend|update|revert)\b", re.I)
+NEGATION = re.compile(r"\b(do not|don'?t|never|must not|without|rather than|instead of|no code lands)\b", re.I)
+CORE_OVERRIDE = "core-patch-approved:"
+
+
+def kernel_edit_line(body: str) -> Optional[str]:
+    """The first line that plainly instructs a kernel edit, or None."""
+    for raw in (body or "").splitlines():
+        line = raw.strip()
+        if not line or not EDIT_VERB_LINE.match(line):
+            continue
+        if NEGATION.search(line):
+            continue                       # "Do not modify tools/kanban_tools.py"
+        m = KERNEL_PATH.search(line)
+        if m:
+            return f"{m.group(0)} (\"{line[:90]}\")"
+    return None
+
+
 CROSS_LANE_BLOCK = frozenset({"rodge", "steve-o", "karl"})   # a build card on one of these
 OVERRIDE = "assignee-override:"
 
@@ -82,6 +127,13 @@ def _marker_owner(title: str) -> Optional[str]:
 
 def verdict(title: str, assignee: str, body: str = "") -> Optional[str]:
     """Pure decision function — unit-tested. Returns a refusal reason, or None."""
+    # The kernel rule is about the DELIVERABLE, so it is independent of assignee and runs
+    # FIRST — a card minted with no assignee, or an unknown one, must not skip it.
+    if CORE_OVERRIDE not in (body or "").lower():
+        hit = kernel_edit_line(body or "")
+        if hit:
+            return f"this card instructs a change to upstream's kernel — {hit}"
+
     a = (assignee or "").strip().lower()
     if not a or not (title or "").strip():
         return None                              # nothing to contradict
@@ -104,6 +156,26 @@ def verdict(title: str, assignee: str, body: str = "") -> Optional[str]:
         return (f"this is a build-lane card but assignee is '{a}', who owns the "
                 f"{'review' if a == 'rodge' else 'verify' if a == 'steve-o' else 'design'} lane")
     return None
+
+
+def _core_message(reason: str) -> str:
+    return (
+        f"Refusing to mint this card: {reason}.\n\n"
+        "Upstream's kanban is the substrate — `hermes_cli/`, `tools/`, `agent/` and "
+        "`gateway/` are not ours to patch (decision 2026-09-09). On 2026-09-12 a batch of "
+        "board-improvement cards patched the kernel anyway: one merge rewrote "
+        "tools/kanban_tools.py by +3891/-1945, silently dropped code another card had added "
+        "ninety minutes earlier, and spawned three more cards to repair the damage. All of it "
+        "was reverted.\n\n"
+        "Re-scope to the first of these that fits:\n"
+        "  1. a PLUGIN on an upstream hook — `pre_tool_call` is the fail-closed one, "
+        "`kind: backend` so it reaches workers (see plugins/kanban-mint-guard);\n"
+        "  2. a `no_agent` WATCHDOG in scripts/ plus a cron entry — zero tokens, reports;\n"
+        "  3. a SOUL or SKILL rule, when what you are fixing is a judgement not a mechanism;\n"
+        "  4. config.\n\n"
+        "If none of them fits, take it to Richie — a core patch is not the fallback. If this "
+        f"really is an approved kernel change, put '{CORE_OVERRIDE} <who approved it>' in the body."
+    )
 
 
 def _message(title: str, assignee: str, reason: str) -> str:
@@ -136,7 +208,8 @@ def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, str]]:
             return None
         logger.warning("kanban-mint-guard: refusing kanban_create — %s (title=%r assignee=%r)",
                        reason, title[:80], assignee)
-        return {"action": "block", "message": _message(title, assignee, reason)}
+        msg = _core_message(reason) if "kernel" in reason else _message(title, assignee, reason)
+        return {"action": "block", "message": msg}
     except Exception:  # noqa: BLE001
         # Never stop a board from minting because this guard had a bad day.
         logger.exception("kanban-mint-guard: unexpected error, allowing")
