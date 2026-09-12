@@ -88,3 +88,59 @@ def test_no_nudge_after_kanban_complete(clear_kanban_env):
 
 
 
+
+
+# ── 2026-09-07: the checkpoint machinery is retired ──────────────────
+
+
+def test_kanban_checkpoint_module_is_gone():
+    import importlib
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("agent.kanban_checkpoint")
+
+
+def test_no_live_import_of_the_retired_module():
+    """Read as source: the loop is 9k lines and importing it for this
+    assertion would drag half the agent in. A stale import is what breaks.
+
+    2026-09-10: the stop-gate wiring moved out of ``conversation_loop.py`` into
+    ``turn_stop_gates.py`` in the upstream decomposition. This test asserted
+    BOTH halves against ``conversation_loop.py``, so the half that matters —
+    "the guard is still wired" — went red on a guard that had simply moved and
+    was working fine. The retired-import half is per-file and stays that way;
+    the wired half is now asked of the agent package as a whole, which is the
+    thing that is actually true or false.
+    """
+    import pathlib, re, agent
+    root = pathlib.Path(agent.__file__).parent
+    for rel in ("conversation_loop.py", "turn_stop_gates.py"):
+        path = root / rel
+        if not path.exists():
+            continue
+        src = path.read_text()
+        assert not re.search(r"^\s*from\s+agent\.kanban_checkpoint\s+import", src, re.M), rel
+        assert not re.search(r"^\s*from\s+agent\s+import\s+kanban_checkpoint", src, re.M), rel
+    wired = [p.name for p in root.glob("*.py")
+             if "build_kanban_stop_nudge" in p.read_text(errors="ignore")]
+    assert wired, "the guard that replaced it must still be wired somewhere in agent/"
+
+
+def test_four_tool_terminal_set_is_our_deliberate_divergence():
+    """Upstream recognises only {complete, block}. A worker that correctly
+    hands off with kanban_request_review has closed its run and must not be
+    steered into completing an unreviewed card (Rodge, 2026-09-01)."""
+    from agent.kanban_stop import _TERMINAL_KANBAN_TOOLS
+    assert _TERMINAL_KANBAN_TOOLS == {
+        "kanban_complete", "kanban_block",
+        "kanban_request_review", "kanban_request_changes",
+    }
+
+
+def test_nudge_still_fires_at_turn_end_and_is_bounded(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_probe")
+    monkeypatch.delenv("HERMES_KANBAN_STOP_NUDGE", raising=False)
+    working = [{"role": "user", "content": "go"},
+               {"role": "tool", "name": "read_file", "tool_call_id": "1", "content": "ok"}]
+    assert build_kanban_stop_nudge(messages=working, attempts=0) is not None
+    assert build_kanban_stop_nudge(messages=working, attempts=1) is not None
+    assert build_kanban_stop_nudge(messages=working, attempts=2) is None

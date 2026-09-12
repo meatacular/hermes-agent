@@ -1,0 +1,15 @@
+name: modelark-pricing
+version: 2.1.0
+kind: backend
+author: WeRoll fleet (Cowork, on Richie's instruction 2026-09-11)
+description: >-
+  The BytePlus ModelArk Coding Plan is a flat subscription: its calls report NO cost. Richie
+  (2026-09-11): record them as what they are and adjust reporting and calculation for it. So this
+  plugin (1) routes every call to the Coding Plan endpoint through Hermes' native
+  "subscription_included" billing mode — $0, cost_status "included", cost_source/label
+  "modelark subscription" — so every native surface (per-turn cost, insights, dashboard) shows it as
+  subscription, never as money; and (2) adjusts the one CALCULATION that $0 would break: the flat
+  $1.00 card cap. kanban_db's per-card cost sum gets a cap-equivalent for Coding Plan usage (tokens x
+  DeepSeek's list rate) so a runaway worker on ModelArk still trips the cap. The cap-equivalent is
+  never stored as cost. Bundled + kind:backend: auto-loads in every profile, worker, cron job and
+  desktop backend. New directory = zero merge-conflict surface. Remove if the fleet leaves ModelArk.

@@ -89,6 +89,34 @@ class TestOrdering:
         assert _totals(db, "s-a")["input_tokens"] == 1 + 3 + 5
         assert _totals(db, "s-b")["input_tokens"] == 2 + 4 + 6
 
+    def test_ac3_provider_attribution_is_an_ordering_barrier(self, db):
+        """Provider metadata participates in the coalescing route key."""
+        db.create_session("s-provider", "test")
+        batch = [
+            ("s-provider", dict(input_tokens=10, model="m", billing_provider="p",
+                                 provider_name="", api_call_count=1)),
+            ("s-provider", dict(input_tokens=20, model="m", billing_provider="p",
+                                 provider_name="DeepInfra", api_call_count=1)),
+        ]
+
+        groups = db._coalesce_token_deltas(batch)
+
+        assert len(groups) == 2
+        assert groups[0][1]["provider_name"] == ""
+        assert groups[1][1]["provider_name"] == "DeepInfra"
+
+    def test_ac3_missing_provider_remains_unattributed_negative_control(self, db):
+        """NEGATIVE CONTROL: no provider metadata must not be invented."""
+        db.create_session("s-provider-negative", "test")
+        batch = [("s-provider-negative", dict(
+            input_tokens=10, model="m", billing_provider="p", api_call_count=1,
+        ))]
+
+        groups = db._coalesce_token_deltas(batch)
+
+        assert len(groups) == 1
+        assert groups[0][1].get("provider_name") is None
+
     def test_absolute_delta_is_an_ordering_barrier(self, db):
         """incremental → absolute → incremental applies in order: the
         absolute overwrite wins over earlier increments, later increments
@@ -114,6 +142,43 @@ class TestOrdering:
 
 
 class TestCoalescing:
+    def test_ac2_mixed_provider_hosts_get_separate_usage_rows(self, db):
+        db.create_session("s-hosts", "test")
+        db.update_token_counts("s-hosts", input_tokens=10, model="m", billing_provider="openrouter",
+                               provider_name="Baidu", estimated_cost_usd=0.1, api_call_count=1)
+        db.update_token_counts("s-hosts", input_tokens=20, model="m", billing_provider="openrouter",
+                               provider_name="StreamLake", estimated_cost_usd=0.2, api_call_count=1)
+        rows = db._conn.execute(
+            "SELECT provider_name, input_tokens, estimated_cost_usd FROM session_model_usage "
+            "WHERE session_id = ? ORDER BY provider_name", ("s-hosts",)
+        ).fetchall()
+        assert [(r["provider_name"], r["input_tokens"], r["estimated_cost_usd"]) for r in rows] == [
+            ("Baidu", 10, 0.1), ("StreamLake", 20, 0.2)
+        ]
+
+    def test_ac2_same_provider_host_stays_one_usage_row(self, db):
+        db.create_session("s-one-host", "test")
+        for tokens in (10, 20):
+            db.update_token_counts("s-one-host", input_tokens=tokens, model="m", billing_provider="openrouter",
+                                   provider_name="Baidu", api_call_count=1)
+        rows = db._conn.execute(
+            "SELECT provider_name, input_tokens FROM session_model_usage WHERE session_id = ?",
+            ("s-one-host",),
+        ).fetchall()
+        assert [(r["provider_name"], r["input_tokens"]) for r in rows] == [("Baidu", 30)]
+
+    def test_ac3_empty_provider_is_its_own_row(self, db):
+        db.create_session("s-empty-host", "test")
+        db.update_token_counts("s-empty-host", input_tokens=10, model="m", billing_provider="openrouter",
+                               provider_name="Baidu", api_call_count=1)
+        db.update_token_counts("s-empty-host", input_tokens=20, model="m", billing_provider="openrouter",
+                               provider_name="", api_call_count=1)
+        rows = db._conn.execute(
+            "SELECT provider_name, input_tokens FROM session_model_usage "
+            "WHERE session_id = ? ORDER BY provider_name", ("s-empty-host",)
+        ).fetchall()
+        assert [(r["provider_name"], r["input_tokens"]) for r in rows] == [("", 20), ("Baidu", 10)]
+
     def test_backlog_coalesces_and_sums_match(self, db):
         """When a backlog forms, same-route deltas merge into fewer applies
         while totals stay exact."""
@@ -165,6 +230,54 @@ class TestCoalescing:
         assert len(usage) == 1
         assert usage[0]["input_tokens"] == n
         assert usage[0]["api_call_count"] == n
+
+    def test_ac1_queued_cache_discounts_accumulate(self, db):
+        """Separate queued upserts add discounts instead of replacing them."""
+        db.create_session("s-discount", "test")
+        for discount in (0.001, 0.002):
+            db.queue_token_counts(
+                "s-discount", input_tokens=1, model="m", billing_provider="p",
+                cache_discount=discount, api_call_count=1,
+            )
+            # Flush each delta separately so the second write exercises the
+            # session_model_usage ON CONFLICT accumulation branch.
+            assert db.flush_token_counts()
+        with db._lock:
+            row = db._conn.execute(
+                "SELECT cache_discount FROM session_model_usage WHERE session_id = ?",
+                ("s-discount",),
+            ).fetchone()
+        assert row["cache_discount"] == pytest.approx(0.003)
+
+    def test_ac3_queued_provider_attribution_persists(self, db):
+        """Queued writes retain the upstream provider through coalescing."""
+        db.create_session("s-provider-write", "test")
+        db.queue_token_counts(
+            "s-provider-write", input_tokens=10, model="m",
+            billing_provider="p", provider_name="DeepInfra", api_call_count=1,
+        )
+        assert db.flush_token_counts()
+        with db._lock:
+            row = db._conn.execute(
+                "SELECT provider_name FROM session_model_usage WHERE session_id = ?",
+                ("s-provider-write",),
+            ).fetchone()
+        assert row["provider_name"] == "DeepInfra"
+
+    def test_ac3_queued_provider_negative_control_stays_empty(self, db):
+        """NEGATIVE CONTROL: no upstream provider remains empty."""
+        db.create_session("s-provider-empty", "test")
+        db.queue_token_counts(
+            "s-provider-empty", input_tokens=10, model="m",
+            billing_provider="p", api_call_count=1,
+        )
+        assert db.flush_token_counts()
+        with db._lock:
+            row = db._conn.execute(
+                "SELECT provider_name FROM session_model_usage WHERE session_id = ?",
+                ("s-provider-empty",),
+            ).fetchone()
+        assert row["provider_name"] == ""
 
     def test_coalesced_apply_equals_sequential_apply(self, db, tmp_path):
         """Applying a coalesced batch produces byte-identical session and
