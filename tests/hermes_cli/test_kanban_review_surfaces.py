@@ -274,10 +274,7 @@ def test_cli_reopen_review_is_transition_first_and_redacts_reason(
     )
     assert "cannot reopen" in invalid_output
     with kbc.connect() as conn:
-        # create_task mints the charter §4 auto-points placeholder on every card
-        # (est-mintpath-20260911); this asserts no REVIEW comment was written.
-        assert [c for c in kb.list_comments(conn, invalid_id)
-                if c.author != "(system)"] == []
+        assert kb.list_comments(conn, invalid_id) == []
 
     success_output = kc.run_slash(
         f'reopen-review {review_id} --reason "revise {secret}"'
@@ -288,8 +285,7 @@ def test_cli_reopen_review_is_transition_first_and_redacts_reason(
         task = kb.get_task(conn, review_id)
         assert task is not None
         assert task.status == "ready"
-        comments = [c for c in kb.list_comments(conn, review_id)
-                    if c.author != "(system)"]
+        comments = kb.list_comments(conn, review_id)
         assert len(comments) == 1
         assert secret not in comments[0].body
 
