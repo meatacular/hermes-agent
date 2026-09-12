@@ -136,7 +136,8 @@ def test_apply_blocks_actionable_and_is_idempotent(db):
     a second apply run is a no-op (no duplicate comment)."""
     mint(db, "t_live", "[Bob] Implement live-flag check", '{"assignee": "rodge"}')
     flags, _ = aw.scan(db, 30)
-    acted = aw.apply_actions(db, flags, commit=True)
+    acted, refused = aw.apply_actions(db, flags, commit=True)
+    assert refused == []
 
     assert len(acted) == 1 and acted[0]["id"] == "t_live"
     row = db.execute("SELECT status, block_kind FROM tasks WHERE id='t_live'").fetchone()
@@ -147,7 +148,7 @@ def test_apply_blocks_actionable_and_is_idempotent(db):
     assert n_ev == 1
 
     # idempotent: already flagged => skipped
-    acted2 = aw.apply_actions(db, flags, commit=True)
+    acted2, _ = aw.apply_actions(db, flags, commit=True)
     assert acted2 == []
     n2 = db.execute("SELECT COUNT(*) n FROM task_comments WHERE task_id='t_live'").fetchone()["n"]
     assert n2 == 1

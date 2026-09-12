@@ -215,6 +215,22 @@ def embedded_owner(title):
     return None
 
 
+_TOPIC_TAG_RE = re.compile(r"^\s*[\[(][^\])]{1,24}[\])]\s*")
+
+
+def _strip_topic_tag(title):
+    """Drop a leading topic tag so an anchored verb match still sees the verb.
+
+    ``TITLE_LANE_VERB`` matches with ``re.match`` (anchored at position 0), so a
+    perfectly ordinary title like ``[build] implement the retry helper`` shifted
+    the verb off position 0 and resolved to lane=None -- invisible to the audit.
+    Owner markers (``[Bob] ...``) are resolved by ``embedded_owner`` BEFORE this
+    is reached, so anything stripped here is a topic tag, not an owner.
+    Same defect, and same fix, as kanban-mint-guard's ``_strip_topic_tag``.
+    """
+    return _TOPIC_TAG_RE.sub("", title or "", count=1).strip()
+
+
 def implied_lane(title, body):
     """Determine the lane the card title/body points at, or None if ambiguous."""
     t = (title or "").strip()
@@ -250,6 +266,12 @@ def implied_lane(title, body):
     for pat, lane in TITLE_LANE_VERB:
         if pat.match(t):
             return lane
+    # Retry the anchored verb patterns with a leading topic tag removed.
+    t_bare = _strip_topic_tag(t)
+    if t_bare and t_bare != t:
+        for pat, lane in TITLE_LANE_VERB:
+            if pat.match(t_bare):
+                return lane
     return None
 
 
@@ -341,8 +363,15 @@ def scan(con, days):
 
 
 def actionable(con, c):
-    """Card still worth flagging/blocking (not done/archived, nothing ran)."""
-    if c["status"] in ("done", "archived", "gave_up"):
+    """Card still worth flagging/blocking (not done/archived, nothing ran).
+
+    A ``running`` card is NEVER actionable: blocking it moves the row out from
+    under a live worker, which the lifecycle does not expect and which no
+    supported call would ever do. A mis-routed card that is already running has
+    lost the argument for pre-emptive blocking anyway — it gets reported, and
+    the mismatch comment is enough for the PM.
+    """
+    if c["status"] in ("done", "archived", "gave_up", "running"):
         return False
     if c["status"] == "blocked":
         # a card already parked as operator_hold / needs_input at mint is not a
@@ -397,24 +426,36 @@ def _block(con, c):
     )
 
 
-def apply_actions(con, flags, commit=True):
-    """Comment + block each actionable mismatch. Returns the list acted on.
+MAX_APPLY_DEFAULT = 3
+
+
+def apply_actions(con, flags, commit=True, max_apply=MAX_APPLY_DEFAULT):
+    """Comment + block each actionable mismatch. Returns (acted, refused).
 
     Idempotent: a card already carrying the [routing-audit] mismatch marker is
     skipped, so a daily re-scan never duplicates a flag. Only actionable cards
-    (not done/archived, nothing ran, not already held) are touched."""
+    (not done/archived/running, nothing ran, not already held) are touched.
+
+    BLAST-RADIUS CAP. If more than ``max_apply`` cards would be acted on, NONE
+    are: the run writes nothing and returns them as ``refused``. Many
+    simultaneous "mis-routings" is far more likely to be this auditor
+    misclassifying than the board genuinely mis-routing a batch, and the failure
+    mode of being wrong at scale here is a blocked board. On 2026-09-06 an
+    unguarded sweep wrote nine cards before anyone looked. Report loudly, write
+    nothing, let a human decide.
+    """
+    candidates = [c for c in flags
+                  if actionable(con, c) and not already_flagged(con, c)]
+    if len(candidates) > max_apply:
+        return [], candidates
     acted = []
-    for c in flags:
-        if not actionable(con, c):
-            continue
-        if already_flagged(con, c):
-            continue
+    for c in candidates:
         _post_comment(con, c)
         _block(con, c)
         acted.append(c)
     if commit and acted:
         con.commit()
-    return acted
+    return acted, []
 
 
 def render_table(flags, gaps, show_headers=True):
@@ -445,8 +486,14 @@ def run(args):
     body = render_table(flags, gaps, show_headers=show_gaps)
 
     if args.apply:
-        acted = apply_actions(con, flags)
+        acted, refused = apply_actions(con, flags, max_apply=args.max_apply)
         con.close()
+        if refused:
+            print(f"[routing-audit] REFUSED TO ACT: {len(refused)} cards would have been "
+                  f"blocked, over the --max-apply cap of {args.max_apply}. Nothing was "
+                  f"written. This many at once usually means the auditor is wrong, not the "
+                  f"board. Review before raising the cap.\n{body}")
+            return body, []
         if acted:
             print(f"[routing-audit] flagged+blocked {len(acted)} actionable mismatch(es) "
                   f"for Jobsy to re-route. Full table:\n{body}")
@@ -552,10 +599,14 @@ def main(argv=None):
     ap.add_argument("--days", type=int, default=1, help="window in days (default 1, cron daily)")
     ap.add_argument("--audit", action="store_true", help="print full mismatch table always")
     ap.add_argument("--gap", action="store_true", help="also report auto-decomposer gap cards")
-    ap.add_argument("--apply", dest="apply", action="store_true", default=True,
-                    help="comment+block actionable flags (default ON for the watchdog; use --no-apply to only report)")
+    ap.add_argument("--apply", dest="apply", action="store_true", default=False,
+                    help="comment+block actionable flags. OFF by default: the safe state is the "
+                         "default, so a caller that forgets a flag reports rather than writes.")
     ap.add_argument("--no-apply", dest="apply", action="store_false",
                     help="report-only: never mutate cards")
+    ap.add_argument("--max-apply", type=int, default=MAX_APPLY_DEFAULT,
+                    help=f"refuse to write at all if more than N cards would be blocked "
+                         f"(default {MAX_APPLY_DEFAULT}); blast-radius cap")
     ap.add_argument("--selftest", action="store_true", help="run self-test fixtures and exit")
     args = ap.parse_args(argv)
 
