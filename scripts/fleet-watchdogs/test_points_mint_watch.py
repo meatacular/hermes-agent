@@ -60,9 +60,17 @@ def test_ignores_cards_older_than_the_window(board):
     assert pmw.unestimated(board, int(time.time()) - 3600) == []
 
 
-def test_ignores_archived_cards(board):
-    add(board, "t_e", status="archived")
+@pytest.mark.parametrize("status", ["archived", "done"])
+def test_ignores_terminal_cards(board, status):
+    """An estimate is a planning number. A dry run over 48 h found 28 finished cards
+    it would otherwise have commented on — noise that moves no metric."""
+    add(board, f"t_e_{status}", status=status)
     assert pmw.unestimated(board, int(time.time()) - 3600) == []
+
+
+def test_control_a_live_card_in_the_same_window_IS_still_flagged(board):
+    add(board, "t_live", status="running")
+    assert ids(pmw.unestimated(board, int(time.time()) - 3600)) == ["t_live"]
 
 
 def test_the_comment_it_writes_is_what_the_LEDGER_parses():

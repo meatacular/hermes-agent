@@ -58,9 +58,12 @@ def comment_body(points: int = PLACEHOLDER) -> str:
 
 def unestimated(conn: sqlite3.Connection, since_epoch: int) -> list[tuple[str, str]]:
     """Cards minted since `since_epoch` that carry no points estimate in any comment."""
+    # Terminal cards are excluded deliberately. An estimate is a planning number —
+    # writing one onto a card that is already done or archived adds a comment nobody
+    # reads and moves no metric, and a dry run over 48h showed 28 such cards.
     rows = conn.execute(
         "SELECT id, COALESCE(title,'') FROM tasks "
-        "WHERE COALESCE(created_at,0) >= ? AND status != 'archived' "
+        "WHERE COALESCE(created_at,0) >= ? AND status NOT IN ('archived','done') "
         "ORDER BY created_at",
         (since_epoch,),
     ).fetchall()
