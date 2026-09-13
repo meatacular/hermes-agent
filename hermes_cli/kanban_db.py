@@ -4548,6 +4548,48 @@ def _tenant_project(tenant: Optional[str]):
         return None
 
 
+def _tenant_project_by_id(project_id: str):
+    """Resolve a project_id to a Project by searching ``kanban-tenants.json``
+    entries by their ``id`` field (not the tenant key). 2026-09-14 (t_2eaa3a62):
+    the auto-decomposer uses board-level project_id (e.g. ``p_5fe7127d``) which
+    is not a tenant key, so ``_tenant_project()`` returns None for it. This
+    searches the same file by the ``id`` value.
+
+    Fail-open: returns ``None`` on any problem.
+    """
+    if not project_id:
+        return None
+    try:
+        path = os.environ.get("HERMES_KANBAN_TENANTS")
+        p = Path(path) if path else _fleet_home() / "kanban-tenants.json"
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text() or "{}")
+        for ent in data.values():
+            if not isinstance(ent, dict):
+                continue
+            if str(ent.get("id") or "").strip() == str(project_id).strip():
+                if not ent.get("primary_path"):
+                    return None
+                from hermes_cli import projects_db as _pdb
+
+                slug = ent.get("slug") or str(project_id)
+                try:
+                    slug = _pdb.normalize_slug(slug) or slug
+                except Exception:
+                    pass
+                return _pdb.Project(
+                    id=str(project_id),
+                    slug=slug,
+                    name=str(ent.get("name") or slug),
+                    created_at=0,
+                    primary_path=str(ent["primary_path"]),
+                )
+        return None
+    except Exception:
+        return None
+
+
 def _maybe_create_deploy_followup(
     conn: sqlite3.Connection,
     task_id: str,

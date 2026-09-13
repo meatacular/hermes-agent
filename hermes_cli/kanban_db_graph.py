@@ -130,11 +130,11 @@ def decompose_triage_task(
     cleanly (no orphan children).
     """
     from hermes_cli.kanban_db import (
-        _canonical_assignee, _link, _append_event, _insert_comment,
-        _inherit_notify_subs, _new_task_id, write_txn, recompute_ready,
-        _assignee_is_known, _worktree_holds_unmerged, _tenant_project,
-        effective_max_cost,
-    )
+            _canonical_assignee, _link, _append_event, _insert_comment,
+            _inherit_notify_subs, _new_task_id, write_txn, recompute_ready,
+            _assignee_is_known, _worktree_holds_unmerged, _tenant_project,
+            effective_max_cost, _board_meta_for, _tenant_project_by_id,
+        )
 
     if not children:
         return None
@@ -148,7 +148,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, project_id "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if root_row is None:
@@ -174,6 +174,12 @@ def decompose_triage_task(
         ).fetchone():
             return None
         tenant = root_row["tenant"]
+        root_project_id = root_row["project_id"]
+        if not root_project_id:
+            try:
+                root_project_id = (_board_meta_for(None).get("project_id") or "").strip() or None
+            except Exception:
+                pass
         root_was_triage = root_row["status"] == "triage"
 
         # Children inherit the root's workspace by default so a fan-out
@@ -272,9 +278,32 @@ def decompose_triage_task(
                 child_ws_path = None
             # 2026-09-06 (W1): never mint a tenant's code child into an empty
             # scratch folder; anchor it under the tenant's repo as its own
-            # worktree (one worktree per card, no sibling sharing).
-            if child_ws_kind == "scratch" and tenant:
-                _tp = _tenant_project(tenant)
+            # worktree (one worktree per card, no sibling sharing). 2026-09-14
+            # (t_2eaa3a62): also handle board-linked project_id when tenant is
+            # None — the WP4 root had no tenant but the board has project_id
+            # p_5fe7127d, so every decomposed child was minted scratch with no
+            # git repo.
+            if child_ws_kind == "scratch" and (tenant or root_project_id):
+                if tenant:
+                    _tp = _tenant_project(tenant)
+                else:
+                    # Non-tenant fallback: resolve project_id from projects.db
+                    # first (creator's per-profile store), then from the fleet
+                    # tenant map by id.
+                    from hermes_cli import projects_db as _pdb
+                    _tp = None
+                    if root_project_id:
+                        try:
+                            with _pdb.connect_closing() as _pconn:
+                                _tp = _pdb.get_project(_pconn, root_project_id)
+                        except Exception:
+                            _tp = None
+                    # Fleet-level fallback: search kanban-tenants.json by id
+                    if _tp is None and root_project_id:
+                        try:
+                            _tp = _tenant_project_by_id(root_project_id)
+                        except Exception:
+                            _tp = None
                 if _tp is not None and _tp.primary_path:
                     child_ws_kind = "worktree"
                     child_ws_path = os.path.join(
@@ -284,8 +313,8 @@ def decompose_triage_task(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
                 " workspace_path, tenant, created_at, created_by, max_cost, "
-                " block_kind) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " block_kind, project_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -303,6 +332,9 @@ def decompose_triage_task(
                     # under the $1.00 ceiling; Steve-o re-estimates from there.
                     effective_max_cost(None),
                     child_block_kind,
+                    # 2026-09-14 (t_2eaa3a62): carry the board/project anchor so
+                    # the child is dispatched into a worktree, not empty scratch.
+                    root_project_id,
                 ),
             )
             _append_event(
