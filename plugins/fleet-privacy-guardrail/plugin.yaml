@@ -1,0 +1,23 @@
+name: fleet-privacy-guardrail
+version: 0.1.0
+kind: backend
+author: Claude (Cowork) for Richie, 2026-09-13
+description: >-
+  Renders the fleet privacy guardrail into every profile's system prompt from ONE source.
+
+  extension-point: plugin
+
+  Measured 2026-09-13: the block was duplicated verbatim into 8 of 9 SOULs (1,262 B each,
+  ~10KB of soul budget) and was MISSING ENTIRELY from `brain` -- the profile that indexes
+  Richie's own corpus. A rule whose own first line says "UNBREAKABLE -- ALL AGENTS, NEVER
+  OVERRIDABLE" was absent from one agent and hand-maintained in seven.
+
+  Copy-paste cannot hold an invariant. This renders it once, into every profile including
+  any added later, with no way for two profiles to disagree.
+
+  kind: backend so it reaches every profile and every kanban worker.
+
+  Fails CLOSED on content and OPEN on execution: if GUARDRAIL.md is unreadable or missing
+  any of its four numbered clauses the section renders nothing rather than a partial rule,
+  and any exception renders nothing rather than failing the session. The SOUL copies are
+  removed only after this is proven to render under every profile.
