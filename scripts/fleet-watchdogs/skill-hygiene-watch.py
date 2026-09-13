@@ -17,7 +17,10 @@ The four checks, each from a defect measured on 2026-09-13:
 3. DESCRIPTION WITHOUT A TRIGGER. 35 of 48 worker-facing descriptions described the artefact
    rather than when to use it; one was literally "|" — a broken YAML block rendering empty.
    The description is the only lever vendors name for selection accuracy.
-4. DANGLING REFERENCE. A SKILL.md routing table pointing at a references/ file that is not there.
+4. DANGLING REFERENCE. A SKILL.md routing table pointing at a references/ file that is not
+   there. A mention that names ANOTHER skill in the same breath resolves against that skill --
+   the first live run flagged four cross-skill pointers that were perfectly valid, and a
+   watchdog that cries wolf is a watchdog nobody reads.
 
 Silent when clean. Read-only apart from its own state file. Zero tokens.
 """
@@ -105,6 +108,38 @@ def render(findings_by_profile):
     return "\n".join(lines)
 
 
+def dangling_refs(body: str, own_present: set, refs_by_skill: dict) -> list:
+    """Pure. references/X.md mentions in `body` that resolve to no file on disk.
+
+    A mention qualified ON THE SAME LINE by another skill's name --
+    `skill_view(name="kanban-ops", file_path="references/gridlock.md")`, an absolute path,
+    or prose like "`hermes-agent` -> `references/background-systems.md`" -- resolves
+    against THAT skill. Everything else resolves against the skill's own references/.
+
+    Same line, not a character window: a window wide enough to catch the routing arrow also
+    catches the name from the PREVIOUS mention, which hid a genuinely missing file. And the
+    name match is whole-word, or a one-letter skill called `a` matches every line in the file.
+    Both were caught by the test gate before this shipped.
+    """
+    out = set()
+    matchers = {n: re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(n) + r"(?![A-Za-z0-9_-])")
+                for n in refs_by_skill}
+    for line in body.splitlines():
+        for m in re.finditer(r"references/([A-Za-z0-9._-]+\.md)", line):
+            fname = m.group(1)
+            before = line[:m.start()]
+            named = [n for n, rx in matchers.items() if rx.search(before)]
+            if named:
+                # longest name wins: weroll-knowledge-search over weroll-knowledge
+                owner = max(named, key=len)
+                if fname not in refs_by_skill[owner]:
+                    out.add(fname)          # named skill really lacks it -- still a bad pointer
+                continue
+            if fname not in own_present:
+                out.add(fname)
+    return sorted(out)
+
+
 # ------------------------------------------------------------------------ gather
 
 def _frontmatter(path: Path) -> dict:
@@ -128,20 +163,31 @@ def skills_of(home: Path) -> dict:
     out = {}
     if not root.is_dir():
         return out
+    found = []
     for p in root.rglob("SKILL.md"):
         if SUPPORT_DIRS & set(p.parts):
             continue
+        found.append(p)
+    # Pass 1: every skill's references/ on this profile, so a cross-skill pointer can be resolved.
+    refs_by_skill = {
+        p.parent.name: ({f.name for f in (p.parent / "references").glob("*.md")}
+                        if (p.parent / "references").is_dir() else set())
+        for p in found
+    }
+    # Pass 2: measure.
+    for p in found:
         fm = _frontmatter(p)
         body = fm.get("_body", "")
-        refs = set(re.findall(r"references/([A-Za-z0-9._-]+\.md)", body))
-        present = {f.name for f in (p.parent / "references").glob("*.md")} \
-            if (p.parent / "references").is_dir() else set()
+        present = refs_by_skill.get(p.parent.name, set())
         try:
             size = p.stat().st_size
         except OSError:
             size = 0
-        out[p.parent.name] = {"bytes": size, "description": fm.get("description", ""),
-                              "dangling": sorted(refs - present)}
+        out[p.parent.name] = {
+            "bytes": size,
+            "description": fm.get("description", ""),
+            "dangling": dangling_refs(body, present, refs_by_skill),
+        }
     return out
 
 

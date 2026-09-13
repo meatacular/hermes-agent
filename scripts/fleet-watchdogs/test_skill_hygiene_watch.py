@@ -104,6 +104,11 @@ def _skill(root, category, name, desc, body="", refs=(), present=()):
     return d
 
 
+def dangling_of(body, own=frozenset(), others=None):
+    """shw.dangling_refs with the profile map defaulted."""
+    return shw.dangling_refs(body, set(own), dict(others or {}))
+
+
 def test_skills_of_reads_size_description_and_dangling(tmp_path):
     _skill(tmp_path, "devops", "a", "Use when X happens.",
            refs=["there.md", "missing.md"], present=["there.md"])
@@ -112,6 +117,73 @@ def test_skills_of_reads_size_description_and_dangling(tmp_path):
     assert got["a"]["description"] == "Use when X happens."
     assert got["a"]["dangling"] == ["missing.md"]
     assert got["a"]["bytes"] > 0
+
+
+# ------------------------------------------------------------- dangling_refs
+# Every case below is a line that actually appears in a live SKILL.md on 2026-09-13.
+# The first live run reported all four as dangling; all four were valid.
+
+def test_own_reference_that_is_missing_is_dangling():
+    assert dangling_of("see references/gone.md", own=set()) == ["gone.md"]
+
+
+def test_own_reference_that_exists_is_not_dangling():
+    assert dangling_of("see references/there.md", own={"there.md"}) == []
+
+
+def test_skill_view_naming_another_skill_resolves_against_that_skill():
+    body = 'skill_view(name="kanban-ops", file_path="references/gridlock.md")'
+    assert dangling_of(body, own=set(), others={"kanban-ops": {"gridlock.md"}}) == []
+
+
+def test_a_routing_arrow_naming_another_skill_resolves_against_it():
+    body = "- `hermes-agent` -> `references/background-systems.md` - kanban model."
+    assert dangling_of(body, own=set(), others={"hermes-agent": {"background-systems.md"}}) == []
+
+
+def test_an_absolute_path_into_another_skill_resolves_against_it():
+    body = "- `/Users/w/.hermes/skills/business/weroll-rider-persona/references/knowledge_search.md`"
+    assert dangling_of(body, own=set(),
+                       others={"weroll-rider-persona": {"knowledge_search.md"}}) == []
+
+
+def test_the_longest_matching_skill_name_wins():
+    """`weroll-knowledge` is a prefix of `weroll-knowledge-search`; the longer one owns it."""
+    body = "weroll-knowledge-search now includes `references/knowledge_search.md`"
+    assert dangling_of(body, own=set(),
+                       others={"weroll-knowledge": set(),
+                               "weroll-knowledge-search": {"knowledge_search.md"}}) == []
+
+
+def test_a_skill_name_on_another_line_does_not_absolve_the_mention():
+    """The control. A name on the previous line is not a qualifier -- that width is exactly
+    how the first draft let one mention's name swallow the next mention's missing file."""
+    body = "kanban-ops owns the board.\nsee references/gridlock.md"
+    assert dangling_of(body, own=set(), others={"kanban-ops": {"gridlock.md"}}) == ["gridlock.md"]
+
+
+def test_a_one_letter_skill_name_does_not_match_every_line():
+    """The control for whole-word matching: skill `a` must not own `see references/x.md`."""
+    assert dangling_of("see references/x.md", own=set(), others={"a": {"x.md"}}) == ["x.md"]
+
+
+def test_a_named_skill_that_really_lacks_the_file_is_still_reported():
+    body = 'skill_view(name="kanban-ops", file_path="references/nope.md")'
+    assert dangling_of(body, own=set(), others={"kanban-ops": {"gridlock.md"}}) == ["nope.md"]
+
+
+def test_skills_of_does_not_flag_a_real_cross_skill_pointer(tmp_path):
+    """End to end through the walker, not just the pure helper."""
+    _skill(tmp_path, "devops", "kanban-ops", "Use when working the board.",
+           present=["gridlock.md"])
+    d = _skill(tmp_path, "devops", "skill-update", "Use when changing a skill.")
+    (d / "SKILL.md").write_text(
+        "---\nname: skill-update\ndescription: \"Use when changing a skill.\"\n---\n"
+        'skill_view(name="kanban-ops", file_path="references/gridlock.md")\n'
+        "see references/own-missing.md\n")
+    got = shw.skills_of(tmp_path)
+    assert got["skill-update"]["dangling"] == ["own-missing.md"]
+    assert got["kanban-ops"]["dangling"] == []
 
 
 def test_support_dirs_are_not_mistaken_for_skills(tmp_path):
