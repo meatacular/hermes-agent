@@ -143,12 +143,27 @@ def verdict(args: Dict[str, Any]) -> Optional[str]:
     )
 
 
-def on_pre_tool_call(tool_name: str = "", tool_input: Any = None, **_kw) -> Optional[Dict[str, str]]:
+def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, str]]:
+    """Upstream calls this as ``invoke_hook("pre_tool_call", tool_name=..., args=...)``.
+
+    The parameter is ``args`` — NOT ``tool_input``. Getting that wrong costs nothing
+    visible: the hook still registers, still runs, reads ``None``, and returns ``None``,
+    so the guard is a silent no-op and every unit test that calls it by the wrong keyword
+    still passes. That is exactly how this plugin shipped green and inert on 2026-09-13,
+    and why ``test_fires_through_upstreams_own_dispatcher`` exists below.
+    """
     try:
-        if tool_name not in GUARDED_TOOLS or not isinstance(tool_input, dict):
+        if payload.get("tool_name") not in GUARDED_TOOLS:
             return None
-        message = verdict(tool_input)
-        return {"action": "block", "message": message} if message else None
+        args = payload.get("args")
+        if not isinstance(args, dict):
+            return None
+        message = verdict(args)
+        if not message:
+            return None
+        logger.warning("kanban-skill-guard: refusing %s — %s",
+                       payload.get("tool_name"), message.split(".")[0])
+        return {"action": "block", "message": message}
     except Exception:                                # noqa: BLE001 — fail open, always
         logger.debug("kanban-skill-guard failed open", exc_info=True)
         return None

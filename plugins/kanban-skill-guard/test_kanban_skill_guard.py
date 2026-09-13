@@ -122,20 +122,28 @@ def test_a_bare_string_skills_field_is_handled(fleet):
 
 # ------------------------------------------------------------------ hook contract
 
+def test_the_hook_reads_args_not_tool_input(fleet):
+    """The contract is `args=`. Calling it by any other keyword must NOT block — that is
+    what a silently-inert plugin looks like, and this test is what catches it."""
+    a = {"assignee": "bob", "skills": ["ascii-art"]}
+    assert ksg.on_pre_tool_call(tool_name="kanban_create", args=a) is not None
+    assert ksg.on_pre_tool_call(tool_name="kanban_create", tool_input=a) is None
+
+
 def test_only_the_guarded_tools_are_inspected(fleet):
     args = {"assignee": "bob", "skills": ["ascii-art"]}
-    assert ksg.on_pre_tool_call(tool_name="kanban_create", tool_input=args)["action"] == "block"
-    assert ksg.on_pre_tool_call(tool_name="terminal", tool_input=args) is None
-    assert ksg.on_pre_tool_call(tool_name="kanban_complete", tool_input=args) is None
+    assert ksg.on_pre_tool_call(tool_name="kanban_create", args=args)["action"] == "block"
+    assert ksg.on_pre_tool_call(tool_name="terminal", args=args) is None
+    assert ksg.on_pre_tool_call(tool_name="kanban_complete", args=args) is None
 
 
 def test_non_dict_input_is_ignored(fleet):
-    assert ksg.on_pre_tool_call(tool_name="kanban_create", tool_input="nope") is None
+    assert ksg.on_pre_tool_call(tool_name="kanban_create", args="nope") is None
 
 
 def test_CONTROL_fails_open_when_the_verdict_itself_raises(fleet, monkeypatch):
     monkeypatch.setattr(ksg, "verdict", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert ksg.on_pre_tool_call(tool_name="kanban_create", tool_input={"assignee": "bob"}) is None
+    assert ksg.on_pre_tool_call(tool_name="kanban_create", args={"assignee": "bob"}) is None
 
 
 # -------------------------------------------------- calibration on the LIVE fleet
@@ -176,3 +184,21 @@ def test_live_no_card_ever_attached_a_skill_this_would_block(monkeypatch):
         for name in sorted(attached):
             assert ksg.verdict({"assignee": prof, "skills": [name], "title": "x"}) is None, \
                 f"{prof} + {name} would be blocked, but that skill has been attached to a real card"
+
+
+# --------------------------------------- integration: upstream's OWN dispatcher
+
+@pytest.mark.skipif(not (LIVE / "profiles" / "bob" / "config.yaml").exists(),
+                    reason="live fleet not present")
+def test_fires_through_upstreams_own_dispatcher(monkeypatch):
+    """The test that would have caught the inert-plugin bug: invoke it the way the
+    kernel does, not the way this module's author assumed."""
+    monkeypatch.setenv("HERMES_HOME", str(LIVE / "profiles" / "bob"))
+    from hermes_cli.plugins import get_pre_tool_call_directive
+    d, m = get_pre_tool_call_directive(
+        "kanban_create", {"assignee": "bob", "skills": ["ascii-art"], "title": "probe", "body": ""})
+    assert d == "block" and "ascii-art" in (m or "")
+    d2, _ = get_pre_tool_call_directive(
+        "kanban_create", {"assignee": "bob", "skills": ["test-driven-development"],
+                          "title": "probe", "body": ""})
+    assert d2 != "block"                       # CONTROL: a kept skill must pass
