@@ -77,6 +77,36 @@ class TestNormalizeProfileName:
         assert normalize_profile_name("Jules") == "jules"
         assert normalize_profile_name("  Librarian ") == "librarian"
 
+    # --- persona aliases (2026-09-13, card t_dcaf62c1) -----------------------
+    # Agent Smith's PERSONA name is "smith"; his PROFILE is the root profile, "default".
+    # The decomposer minted a deploy card with assignee "smith". Because the card was
+    # created `blocked` (operator_hold), create_task's phantom-assignee guard was skipped
+    # by design ("a blocked card is never dispatched anyway" — kanban_db.py:1400-1416),
+    # so nothing complained for two hours. The moment the hold was released the dispatcher
+    # looked for a `smith` profile, found none, and silently re-blocked the card with
+    # kind=null. Aliasing here fixes BOTH ends at once, which is the point: create-time
+    # (_canonical_assignee) and dispatch-time (profile_exists) both resolve through this
+    # one function, so they cannot disagree about what is a phantom.
+
+    @pytest.mark.parametrize("name", ["smith", "Smith", "  SMITH ", "agent-smith", "Agent-Smith"])
+    def test_persona_aliases_resolve_to_the_root_profile(self, name):
+        assert normalize_profile_name(name) == "default"
+
+    def test_aliasing_does_not_swallow_other_names(self):
+        """The control: only the declared aliases move. A real profile named `smithers`,
+        or any other name, must still normalize to itself."""
+        for name in ("smithers", "blacksmith", "smith-2", "bob", "rodge", "steve-o"):
+            assert normalize_profile_name(name) == name.lower()
+
+    def test_every_alias_target_is_a_real_profile_name(self):
+        """An alias pointing at a profile that does not exist would move the failure rather
+        than fix it — the card would resolve to a different phantom."""
+        from hermes_cli.profiles import _PROFILE_ALIASES
+        for src, dst in _PROFILE_ALIASES.items():
+            assert dst == "default" or dst.islower()
+            assert normalize_profile_name(dst) == dst          # targets are already canonical
+            assert src == src.lower()                          # keys are matched lowercased
+
 
 class TestValidateProfileName:
     """Tests for validate_profile_name()."""

@@ -170,6 +170,12 @@ def _missing_profile_error(canon: str) -> FileNotFoundError:
 
 # Validation
 
+_PROFILE_ALIASES: dict[str, str] = {
+    "smith": "default",
+    "agent-smith": "default",
+}
+
+
 def normalize_profile_name(name: str) -> str:
     """Canonical profile id used on disk and in ``-p`` argv: lowercase, ``default`` matched
     case-insensitively. Dashboards/tools may pass title-cased labels — normalize before
@@ -184,7 +190,11 @@ def normalize_profile_name(name: str) -> str:
         raise ValueError("profile name cannot be empty")
     if stripped.casefold() == "default":
         return "default"
-    return stripped.lower()
+    # Persona-name aliases: Agent Smith's profile is ``default``, not ``smith``.
+    canon = stripped.lower()
+    if canon in _PROFILE_ALIASES:
+        return _PROFILE_ALIASES[canon]
+    return canon
 
 
 def validate_profile_name(name: str) -> None:
