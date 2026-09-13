@@ -673,29 +673,32 @@ def soul_model_line(doc: dict, p: str) -> str:
 
 
 def soul_table(doc: dict) -> str:
+    """The ROUTING table only — compact by design (ctxbudget-20260913).
+
+    This block was 6,248 B, 21% of Smith's entire SOUL, and it is loaded on every one of his
+    turns. Subagent and vision chains were near-identical on all nine rows, and the `why`
+    column is rationale, not routing: none of it changes a dispatch decision. All three still
+    live in `fleet/models.yaml`, which is the source of truth and one `read_file` away, so
+    nothing is lost — it is just no longer resident in the prompt.
+    """
     rows = [TABLE_BEGIN,
-            "*Generated from `~/.hermes/fleet/models.yaml` — the single model file. Change models on the dashboard's "
-            "Models tab (or `plugins/fleet-models/core.py`), never by hand in config.yaml: a hand edit is drift and "
-            "the next apply overwrites it.*", "",
-            "| Profile | Main loop | Subagents | Vision | Why |", "|---|---|---|---|---|"]
+            "*Generated from `~/.hermes/fleet/models.yaml`, the single model file — change models on the "
+            "dashboard's Models tab (or `plugins/fleet-models/core.py`), never by hand in config.yaml: a hand "
+            "edit is drift and the next apply overwrites it. Subagent/vision chains, the rationale for each "
+            "choice and every host pin are in that file; read it when you need them rather than carrying them "
+            "here.*", "",
+            "| Profile | Main loop | Vision (when it differs) |", "|---|---|---|"]
     for p in PROFILES:
         a = doc["agents"][p]
         name = "`default` (you)" if p == "root" else f"`{p}`"
         aux = a.get("aux") or {}
-        rows.append(f"| {name} | {_chain_text(doc, a['main'])} | {_chain_text(doc, a['subagents']) if a.get('subagents') else 'inherits main'} | "
-                    f"{_chain_text(doc, aux['vision']) if 'vision' in aux else 'main model'} | {a.get('why') or ''} |")
+        main = _chain_text(doc, a["main"])
+        vision = _chain_text(doc, aux["vision"]) if "vision" in aux else ""
+        rows.append(f"| {name} | {main} | {'' if vision == main else vision} |")
     root_aux = (doc["agents"].get("root") or {}).get("aux") or {}
     helpers = sorted({f"{t}: {_chain_text(doc, sp)}" for t, sp in root_aux.items() if t != "vision"})
-    rows += ["", "Your helpers — " + "; ".join(helpers) + "." if helpers else ""]
-    for alias, m in doc["models"].items():
-        bits = []
-        if (m.get("hosts") or {}).get("order") or (m.get("hosts") or {}).get("only"):
-            bits.append("hosts " + " → ".join((m["hosts"].get("order") or m["hosts"].get("only"))))
-        if m.get("reasoning"):
-            bits.append(f"reasoning {m['reasoning']}")
-        if bits and any(alias in chain_of(sp) for a in doc["agents"].values()
-                        for sp in [a.get("main"), a.get("subagents"), a.get("cron"), *(a.get("aux") or {}).values()]):
-            rows.append(f"`{_short(doc, alias)}` = `{m['id']}` on OpenRouter — {'; '.join(bits)}.  ")
+    if helpers:
+        rows += ["", "Your helpers — " + "; ".join(helpers) + "."]
     rows.append(TABLE_END)
     return "\n".join(rows)
 
