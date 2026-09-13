@@ -36,6 +36,8 @@ LANE_PATTERNS = (
     ("deploy", re.compile(r"^\s*(\[deploy\]|deploy\b|ship\b|release\b|roll\s*out\b)", re.I)),
     ("design", re.compile(r"^\s*(\[karl\]|karl\s*[—–-]|spec\b|design\b)", re.I)),
     ("pm",     re.compile(r"^\s*(\[jobsy\]|jobsy\s*[—–-]|decompose\b|triage\b)", re.I)),
+    # Verbs kept in sync with _BUILD_LANE_VERBS below (same order, same words) — see the
+    # "TWO LISTS" note on EDIT_VERB_LINE for why they are separate regexes.
     ("build",  re.compile(r"^\s*(\[bob\]|bob\s*[—–-]|build\b|implement\b|fix\b|patch\b|repair\b|rework\b|plumb\b|add\b|create\b|restore\b|scaffold\b|migrate\b)", re.I)),
 )
 
@@ -67,9 +69,29 @@ KERNEL_PATH = re.compile(
     r"(?:(?:" + "|".join(KERNEL_DIRS) + r")/[\w./-]*\.py"        # hermes_cli/kanban_db.py
     r"|kanban_(?:db|tools|decompose|db_graph|db_dispatch)\w*\.py)",  # or the bare module
     re.I)
+# 2026-09-14 (runfix-20260914): the verb list was the hole, and it was a hole of the
+# fleet's own making. Until today this read
+# ``(patch|edit|modify|change|refactor|amend|update|revert)`` while LANE_PATTERNS["build"]
+# — forty lines above, in this same file — already knew that ``fix``, ``add``, ``create``,
+# ``implement``, ``plumb``, ``repair``, ``restore``, ``scaffold`` and ``migrate`` are the
+# words people actually use for "write this code". Card t_dcaf62c1 said "**Fix** the
+# decomposer" and "**Add** creation-time mapping in `kanban_db.py`"; neither verb was in
+# the kernel list, so the guard passed it and a kernel patch went in unreviewed.
+#
+# TWO LISTS, ONE OF WHICH MUST BE A SUPERSET. They are deliberately NOT merged: widening
+# the LANE regex would re-classify ordinary cards ("Update the runbook" is not a build
+# card), which changes assignee routing. The invariant that matters is one-directional —
+# every build-lane verb must also be a kernel-edit verb, or a card can name the build lane
+# and edit the kernel without this rule seeing it. ``test_kernel_verbs_cover_build_lane``
+# pins exactly that, so the two can never drift apart in the dangerous direction again.
+_BUILD_LANE_VERBS = ("build", "implement", "fix", "patch", "repair", "rework",
+                     "plumb", "add", "create", "restore", "scaffold", "migrate")
+_KERNEL_ONLY_VERBS = ("edit", "modify", "change", "refactor", "amend", "update",
+                      "revert", "rewrite", "wire", "introduce", "delete", "remove")
+EDIT_VERBS = tuple(dict.fromkeys(_BUILD_LANE_VERBS + _KERNEL_ONLY_VERBS))
 EDIT_VERB_LINE = re.compile(
     r"^\s*(?:[-*+]\s*|\d+[.)]\s*|#+\s*)?(?:\*\*)?"
-    r"(patch|edit|modify|change|refactor|amend|update|revert)\b", re.I)
+    r"(" + "|".join(EDIT_VERBS) + r")\b", re.I)
 NEGATION = re.compile(r"\b(do not|don'?t|never|must not|without|rather than|instead of|no code lands)\b", re.I)
 CORE_OVERRIDE = "core-patch-approved:"
 

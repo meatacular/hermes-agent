@@ -108,3 +108,63 @@ def test_it_leaves_no_index_lock(repo):
     commit(r, "hermes_cli/kanban_db.py", "print(1)", "feat: patch")
     run(["--since", base, "--no-state"])
     assert not (r / ".git" / "index.lock").exists()
+
+
+# --- working-tree arm (2026-09-14, runfix-20260914) --------------------------
+# The commit scan cannot see a kernel edit that was never committed. On 2026-09-13 that
+# was not hypothetical: t_dcaf62c1 left hermes_cli/profiles.py modified and uncommitted,
+# this watchdog's state recorded an empty range, and it reported nothing.
+
+def test_an_uncommitted_kernel_edit_is_reported(repo):
+    r, base = repo
+    (r / "hermes_cli").mkdir(parents=True, exist_ok=True)
+    (r / "hermes_cli" / "profiles.py").write_text("x = 1\n")
+    out = run([])
+    assert "UNCOMMITTED kernel change" in out
+    assert "hermes_cli/profiles.py" in out
+
+
+def test_the_first_porcelain_line_is_not_mangled(repo):
+    """git() strips its output, eating the leading space of the FIRST status line.
+
+    A fixed line[3:] parse therefore drops exactly one character from exactly one path —
+    the first one — and the file silently vanishes from the report. This is the regression
+    test for that: with only ONE dirty file there is nothing else to hide behind.
+    """
+    r, base = repo
+    commit(r, "hermes_cli/profiles.py", "orig\n", "seed")
+    (r / "hermes_cli" / "profiles.py").write_text("modified\n")
+    assert cpw.uncommitted_kernel_files() == ["M hermes_cli/profiles.py"]
+
+
+def test_control_a_dirty_NON_kernel_file_is_silent(repo):
+    r, base = repo
+    (r / "scripts").mkdir(parents=True, exist_ok=True)
+    (r / "scripts" / "watch.py").write_text("x = 1\n")
+    (r / "plugins").mkdir(parents=True, exist_ok=True)
+    (r / "plugins" / "p.py").write_text("x = 1\n")
+    out = run([])
+    assert "UNCOMMITTED" not in out, out
+    assert cpw.uncommitted_kernel_files() == []
+
+
+def test_control_a_clean_tree_is_silent(repo):
+    assert cpw.uncommitted_kernel_files() == []
+
+
+def test_a_renamed_kernel_file_reports_its_destination(repo):
+    r, base = repo
+    commit(r, "hermes_cli/old.py", "x\n", "seed")
+    sh(r, "mv", "hermes_cli/old.py", "hermes_cli/new.py")
+    hits = cpw.uncommitted_kernel_files()
+    assert any("hermes_cli/new.py" in h for h in hits), hits
+
+
+def test_the_working_tree_arm_fires_on_a_FIRST_run_too(repo, tmp_path):
+    """A live condition, not an event in a range: baselining must not swallow it."""
+    r, base = repo
+    (tmp_path / "state.json").unlink(missing_ok=True)
+    (r / "hermes_cli").mkdir(parents=True, exist_ok=True)
+    (r / "hermes_cli" / "profiles.py").write_text("x = 1\n")
+    out = run([])
+    assert "UNCOMMITTED kernel change" in out, out

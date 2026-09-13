@@ -19,6 +19,17 @@ Exempt, because these are how the kernel is SUPPOSED to change:
   * a commit whose message carries `core-patch-approved:` (Richie said yes);
   * a revert, which is the kernel moving back toward upstream, never away.
 
+It also reads the WORKING TREE, added 2026-09-14 (runfix-20260914). Reading commits
+alone left the obvious hole: a kernel edit that is never committed is invisible here
+FOREVER. That is not hypothetical — card t_dcaf62c1 modified hermes_cli/profiles.py on
+2026-09-13 and never committed it, so this watchdog's state file recorded an empty range
+(`2276b8ef978..2276b8ef978`) and it reported nothing, correctly and uselessly. An
+uncommitted kernel edit is also the more dangerous shape: `hermes update` stashes local
+changes, so the fix silently stops applying and nothing says why.
+
+`fleet-preflight` and `hermes-healthcheck` both flag a dirty tree, but neither says the
+dirty file is a KERNEL file — which is the fact that decides whether it needs approval.
+
 Silent when clean. Read-only: it never writes to the repo or the board.
 """
 from __future__ import annotations
@@ -26,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -73,6 +85,32 @@ def exempt_shas() -> set[str]:
     return shas
 
 
+def uncommitted_kernel_files() -> list[str]:
+    """Kernel paths with uncommitted changes in the working tree or the index.
+
+    `--no-optional-locks` for the same reason every other git call here uses it: a
+    read-only `git status` has left an index.lock on this repo before, and a stale one
+    blocks the fleet's own merges. Porcelain v1 so the parse is stable: XY then the path,
+    and ` -> ` for a rename (take the destination).
+    """
+    out = git("status", "--porcelain", "--untracked-files=all")
+    hits = []
+    for line in out.splitlines():
+        # NOT column offsets. `git()` .strip()s its output, which eats the leading space of
+        # the FIRST porcelain line (" M path" -> "M path"), so a fixed line[3:] silently
+        # mangles exactly one file — caught by running this against the real dirty tree
+        # rather than a fixture, which is the only reason it is not still wrong.
+        m = re.match(r"^\s*(?P<xy>[A-Z?!][A-Z?! ]?)\s+(?P<path>.+)$", line)
+        if not m:
+            continue
+        path = m.group("path").strip().strip('"')
+        if " -> " in path:                      # rename: the destination is what exists now
+            path = path.split(" -> ", 1)[1].strip().strip('"')
+        if path.startswith(KERNEL_DIRS):
+            hits.append(f"{m.group('xy').strip() or '??'} {path}")
+    return sorted(hits)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", help="explicit start ref (default: the last run's HEAD)")
@@ -86,6 +124,21 @@ def main() -> int:
     if not head:
         print(f"core-patch-watch: cannot resolve {a.branch} in {REPO}")
         return 0
+
+    # The working-tree arm runs FIRST and is deliberately outside the state/baseline
+    # machinery: an uncommitted kernel edit is a live condition, not an event in a range,
+    # so a first run must still report it rather than silently baseline over it.
+    dirty = uncommitted_kernel_files()
+    if dirty:
+        print(f"🔧 core-patch-watch: {len(dirty)} UNCOMMITTED kernel change(s) in {REPO}")
+        print("   An uncommitted kernel edit is invisible to the commit scan below and is "
+              "stashed by `hermes update` — at which point the change stops applying and "
+              "nothing says why.")
+        for d in dirty:
+            print(f"      {d}")
+        print("   Commit it with a `core-patch-approved: <who>` line if it is sanctioned, "
+              "or revert it and re-express the fix as a plugin / watchdog / skill / SOUL "
+              "rule / config key.")
 
     try:
         prev = json.loads(STATE.read_text()).get("head")

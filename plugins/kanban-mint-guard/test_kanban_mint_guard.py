@@ -156,3 +156,55 @@ def test_control_the_kernel_rule_is_not_vacuous(monkeypatch):
     missed = [n for n, t, a, b in KERNEL_MUST_BLOCK
               if "kernel" not in (mg.verdict(t, a, b) or "")]
     assert not missed, f"rule is vacuous for: {missed}"
+
+
+# --- verb-list widening (2026-09-14, runfix-20260914) ------------------------
+# The real card the narrow list let through. t_dcaf62c1 proposed a change to
+# hermes_cli/kanban_db.py with the verbs "Fix" and "Add"; neither was in the kernel
+# verb list, so the guard passed it, the worker edited hermes_cli/profiles.py instead,
+# and the patch was never committed — which also made it invisible to core-patch-watch,
+# because that reads commits. Both holes are closed; this pins the mint-guard half.
+
+DCAF62_BODY = """## Fix options
+
+1. **Add a `smith` profile** (symlink/alias to `default` or standalone config)
+2. **Fix the decomposer** to use `default` instead of `smith` in its deploy-role assignment
+3. **Add creation-time mapping** in `kanban_db.py` to resolve unknown aliases
+"""
+
+
+def test_the_card_that_got_through_on_2026_09_13_is_now_refused():
+    assert mg.kernel_edit_line(DCAF62_BODY) is not None
+
+
+@pytest.mark.parametrize("verb", ["fix", "add", "create", "implement", "plumb",
+                                  "repair", "restore", "scaffold", "migrate", "rework"])
+def test_each_build_lane_verb_is_also_a_kernel_edit_verb(verb):
+    assert mg.kernel_edit_line(f"{verb.capitalize()} the lint in hermes_cli/kanban_db.py") is not None
+
+
+def test_kernel_verbs_cover_build_lane():
+    """The one-directional invariant: every build-lane verb must also be a kernel-edit verb.
+
+    Two verb lists live in this module on purpose (widening the LANE regex would re-route
+    ordinary cards), but they may only drift in the safe direction. A build verb that is not
+    a kernel verb is exactly the 2026-09-13 hole: a card can name the build lane and edit the
+    kernel without this rule seeing it.
+    """
+    assert set(mg._BUILD_LANE_VERBS) <= {v.lower() for v in mg.EDIT_VERBS}
+
+
+def test_widening_did_not_break_the_negation_or_the_path_anchor():
+    # the two shapes that keep the rule usable — both regressions would stop the board
+    assert mg.kernel_edit_line("Add a lint. Do not modify tools/kanban_tools.py") is None
+    assert mg.kernel_edit_line("Add a helper in backend/app/tools/export.py") is None
+
+
+def test_control_the_widening_is_not_vacuous(monkeypatch):
+    """Restore the OLD narrow verb list and watch the new cases go green->red."""
+    import re as _re
+    narrow = _re.compile(r"^\s*(?:[-*+]\s*|\d+[.)]\s*|#+\s*)?(?:\*\*)?"
+                         r"(patch|edit|modify|change|refactor|amend|update|revert)\b", _re.I)
+    monkeypatch.setattr(mg, "EDIT_VERB_LINE", narrow)
+    assert mg.kernel_edit_line(DCAF62_BODY) is None      # the old list really did miss it
+    assert mg.kernel_edit_line("Patch hermes_cli/kanban_db.py") is not None   # and still worked otherwise
