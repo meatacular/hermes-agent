@@ -1,0 +1,33 @@
+name: kanban-skill-guard
+version: 0.1.0
+kind: backend
+author: Claude (Cowork) for Richie, 2026-09-13
+description: >-
+  Mint-time guard: refuse a card that names a skill DISABLED for its assignee.
+
+  extension-point: plugin
+
+  The defect, measured 2026-09-13: build_preloaded_skills_prompt passes
+  disabled_as_missing=True, so a skill in a profile's skills.disabled cannot be
+  force-loaded onto a card. The dispatcher's pre-flight, missing_skills_for(), only
+  walks the FILESYSTEM and so returns "allow". The card is claimed, the workspace is
+  built, the worker forks -- and exits 1 at agent init with "Unknown skill(s)". Twice.
+  The dispatcher sees only exit_code 1. That is the 2026-09-05 failure that lost six
+  cards, re-armed on 2026-09-13 when ~55% of the fleet's skills were disabled as
+  never-opened.
+
+  Why a plugin and not a fix in hermes_cli: hermes_cli/ is upstream's substrate
+  (2026-09-09 decision, enforced since 09-12). This imports nothing from it -- it reads
+  the profile's config.yaml with a hand-rolled scan -- so it has zero merge surface.
+
+  kind: backend so it loads in every profile and every kanban worker. A user plugin in
+  ~/.hermes/plugins is invisible to workers; that is why the completion gate was a
+  silent no-op 09-09 to 09-11.
+
+  Deliberately narrow. It fires ONLY on installed-but-disabled, never on absent -- the
+  dispatcher's own check owns the absent case and blocks it correctly with a typed
+  capability reason. Escape hatch: `skill-override:` in the card body.
+
+  Fail-open by construction: no skills named, no assignee, unreadable config, or any
+  exception at all -> the card is created. A guard that guesses stops the board, which
+  is worse than the defect it prevents.
