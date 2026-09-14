@@ -104,6 +104,13 @@
 .fm-stat--sub .fm-stat-value { color: var(--fm-sub); }
 .fm-stat--warn .fm-stat-value { color: var(--color-warning, #d97706); }
 .fm-stat--ok .fm-stat-value { color: var(--color-success, #16a34a); }
+.fm-stat--or .fm-stat-value { color: var(--fm-or); }
+/* The balance row is a second, quieter band under the headline stats: same card shape so the
+   numbers stay comparable at a glance, dimmer label so it reads as "what is left" rather than
+   "what happened". 2026-09-15. */
+.fm-stats--bal { margin-top: -4px; }
+.fm-stats--bal .fm-stat { background: var(--fm-softer); }
+.fm-stats--bal .fm-stat-label { opacity: 0.85; }
 
 /* fleet cards */
 .fm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(460px, 100%), 1fr)); gap: 12px; }

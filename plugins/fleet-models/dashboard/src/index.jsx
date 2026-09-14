@@ -282,14 +282,74 @@ function ChainEditor({ doc, chain, onChange, filter, setDraft, wantsVision }) {
   );
 }
 
-function Stat({ label, value, sub, tone }) {
+function Stat({ label, value, sub, tone, title }) {
   return (
-    <div className={cls("fm-stat", tone && "fm-stat--" + tone)}>
+    <div className={cls("fm-stat", tone && "fm-stat--" + tone)} title={title}>
       <div className="fm-stat-label">{label}</div>
       <div className="fm-stat-value">{value}</div>
       {sub ? <div className="fm-stat-sub">{sub}</div> : null}
     </div>
   );
+}
+
+// ── provider balances ────────────────────────────────────────────────────────────────────
+// 2026-09-15 (Richie): "can we add balances on openrouter and modelark similar to the card you
+// have added for deepseek? only add if possible." Two of the three are possible. The three are
+// NOT the same kind of number and the cards refuse to pretend otherwise:
+//   OpenRouter — prepaid credit, plus an optional monthly limit. Whichever empties first is the
+//                one that binds, and that is the one the runway is quoted against.
+//   DeepSeek   — metered postpay against a topped-up balance; Hermes' own figure is an estimate
+//                from the rate card, the balance is the invoice side.
+//   ModelArk   — a flat subscription. There is no balance, and BytePlus exposes no quota endpoint
+//                on an ark- key, so this card reports quota STATE and says plainly why there is no
+//                dollar figure. Showing $0 here would read as "out of money" and be a lie.
+function relAge(ts) {
+  if (!ts) return null;
+  const m = Math.round(Date.now() / 1000 - ts) / 60;
+  return m < 1 ? "just now" : m < 60 ? Math.round(m) + "m ago" : Math.round(m / 60) + "h ago";
+}
+
+function BalanceStats({ balances, T }) {
+  if (!balances) return null;
+  const or = balances.openrouter, ds = balances.deepseek, ma = balances.modelark;
+  const spent = (k) => (T && T.by_payer && T.by_payer[k]) || null;
+  const cards = [];
+  if (or && or.balance_usd != null) {
+    const low = or.runway_h != null && or.runway_h < 48;
+    cards.push(
+      <Stat key="or" tone={low ? "warn" : "or"} label="OpenRouter credit"
+        value={money(or.balance_usd, 2) + " left"}
+        title={[or.credits_purchased_usd != null ? money(or.credits_purchased_usd, 2) + " bought, " + money(or.credits_used_usd, 2) + " used" : null,
+          or.invoiced_today_usd != null ? "OpenRouter invoiced " + money(or.invoiced_today_usd, 2) + " today" : null,
+          "burn " + money(or.burn_usd_per_h, 3) + "/h over " + or.window_hours + "h",
+          or.source === "api" ? "read live from the OpenRouter API" : "from the budget-watch heartbeat " + (relAge(or.at) || ""),
+        ].filter(Boolean).join(" · ")}
+        sub={[or.limit_remaining_usd != null ? money(or.limit_remaining_usd, 2) + " of " + money(or.limit_usd, 2) + " monthly" : null,
+          or.runway_h != null ? Math.round(or.runway_h) + "h runway on the " + or.binding : null,
+        ].filter(Boolean).join(" · ") || "prepaid credit"} />
+    );
+  }
+  if (ds) {
+    const w = spent("deepseek");
+    cards.push(
+      <Stat key="ds" tone="ds" label="DeepSeek credit"
+        value={ds.balance_usd != null ? money(ds.balance_usd, 2) + " left" : "—"}
+        title={ds.cost_basis + (ds.at ? " · read " + relAge(ds.at) : "")}
+        sub={"metered · " + (w ? money(w.billed_usd, 4) + " estimated this window" : "no calls this window")} />
+    );
+  }
+  if (ma) {
+    cards.push(
+      <Stat key="ma" tone={ma.exhausted ? "warn" : "sub"} label="ModelArk quota"
+        value={ma.exhausted ? "Exhausted" : "Available"}
+        title={ma.why_no_balance + " · " + ma.cost_basis}
+        sub={(ma.exhausted && ma.reset_at ? "resets " + ma.reset_at + " · " : "no balance to read · ")
+          + num(ma.window_calls) + " calls in " + ma.quota_window_h + "h · "
+          + money(ma.window_capeq_usd, 2) + " cap-equivalent"} />
+    );
+  }
+  if (!cards.length) return null;
+  return <div className="fm-stats fm-stats--bal">{cards}</div>;
 }
 
 function Badge({ tone, children, title }) {
@@ -476,6 +536,7 @@ function FleetView({ state, doc, usage, win, onOpen }) {
         <Stat label="Registry" value={Object.keys(models).length + " models"} sub={Object.values(models).filter((m) => m.provider === "modelark").length + " subscription · " + Object.values(models).filter((m) => m.provider === "openrouter").length + " OpenRouter"} />
         <Stat label="Sync" value={Object.keys(state.drift || {}).length ? Object.keys(state.drift).length + " drifted" : "all 9 in sync"} tone={Object.keys(state.drift || {}).length ? "warn" : "ok"} sub={"revision " + state.revision} />
       </div>
+      <BalanceStats balances={state.balances} T={T} />
       <div className="fm-grid">
         {state.profiles.map((p) => (
           <AgentCard key={p} doc={doc} p={p} drift={(state.drift || {})[p]} use={usage ? byP[p] || empty : null} win={win}
@@ -883,13 +944,8 @@ function CostsView({ doc, usage, win, width, balances }) {
           sub={`${tok(T.cache_read)} of ${tok((T.input || 0) + (T.cache_read || 0))} prompt tokens`} />
         <Stat label="ModelArk subscription" value={num(tot.ma) + " calls"} tone="sub" sub={"$0 · cap-equivalent " + money(tot.cap, 2)} />
         <Stat label="All calls" value={num(tot.calls)} sub={payerSub(T)} />
-        {balances && balances.deepseek ? (
-          <Stat label="DeepSeek direct" tone="ds"
-            value={balances.deepseek.balance_usd != null ? money(balances.deepseek.balance_usd, 2) + " left" : "—"}
-            sub={"metered · " + ((T.by_payer && T.by_payer.deepseek)
-              ? money(T.by_payer.deepseek.billed_usd, 4) + " estimated this window" : "no calls this window")} />
-        ) : null}
       </div>
+      <BalanceStats balances={balances} T={T} />
       <Section title="Over time" right={<span className="fm-muted fm-small">{bucketName(usage.bucket)} bars · tap or hover a bar</span>}>
         <TimeChart usage={usage} width={width} />
         <p className="fm-muted fm-small fm-tc-foot">From all nine ledgers. Each session's usage is spread evenly between its first and last call, so short windows are close estimates. Faded bars are part-way through.</p>

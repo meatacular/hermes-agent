@@ -1,9 +1,9 @@
 {
   "name": "fleet-models",
   "label": "Fleet Models",
-  "description": "Every agent's model waterfall from one file (~/.hermes/fleet/models.yaml) \u2014 live settings, hosts, prices, input/output/cache token tracking, usage and cost, an OpenRouter model search on every waterfall, with preview, apply and revert",
+  "description": "Every agent's model waterfall from one file (~/.hermes/fleet/models.yaml) \u2014 live settings, hosts, prices, input/output/cache token tracking, usage and cost, provider balances, an OpenRouter model search on every waterfall, with preview, apply and revert",
   "icon": "Activity",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "tab": {
     "path": "/fleet-models",
     "position": "after:kanban"

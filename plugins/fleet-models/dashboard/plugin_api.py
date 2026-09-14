@@ -386,28 +386,227 @@ def _caps(root: Path) -> dict:
         return {}
 
 
-def _direct_provider_balances(root: Path) -> dict:
-    """What a DIRECT provider's own API says is left, next to what Hermes estimated it spent.
+# ── provider balances ────────────────────────────────────────────────────────────────────────
+# 2026-09-15 (Richie): "deepseek direct api costs will be different to openrouter costs. can we
+# add balances on openrouter and modelark similar to the card you have added for deepseek? only
+# add if possible." Two of the three are possible and both are here. The third is not, and says
+# so in its own payload rather than inventing a number — see _modelark_quota.
+_BAL_TTL = 300
+_BAL: Dict[str, Any] = {"at": 0.0, "data": None}
+_BAL_LOCK = threading.Lock()
 
-    DeepSeek returns no per-call cost, so every Hermes number for that rung is an estimate from
-    the published rate card. Its `/user/balance` endpoint — same key, no second credential — is
-    the invoice side, and `scripts/deepseek-balance-watch.py` records it. Surfacing both is what
-    stops a metered provider reading as a free one.
-    """
-    out = {}
+
+def _env_key(name: str) -> Optional[str]:
+    """os.environ first, then ~/.hermes/.env via Hermes' own loader. The dashboard process does not
+    always inherit the gateway's environment."""
+    v = os.environ.get(name)
+    if v:
+        return v.strip()
     try:
-        st = json.loads((root / "state" / "deepseek-balance.json").read_text())
-        out["deepseek"] = {
-            "balance_usd": st.get("balance_usd"),
-            "cumulative_spent_usd": st.get("cumulative_spent_usd"),
-            "window_spent_usd": st.get("window_spent_usd"),
-            "window_estimated_usd": st.get("window_estimated_usd"),
-            "at": st.get("at"),
-            "billing": "metered",
-            "cost_basis": "estimated per call from the published rate card; balance is the invoice side",
-        }
+        from hermes_cli.env_loader import load_hermes_dotenv  # type: ignore
+        load_hermes_dotenv()
+        v = os.environ.get(name)
+        return v.strip() if v else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _provider_spend(root: Path, hours: float) -> Dict[str, dict]:
+    """Trailing spend per BILLING provider, from the same ledgers and the same classification the
+    charts use. `billed_usd` is money actually invoiced; `capeq_usd` is what a subscription rung
+    would have cost on the metered route (zero for metered providers, where the two are the same
+    thing)."""
+    now = time.time()
+    since = now - hours * 3600
+    try:
+        doc = _core().load_doc(root)
+    except Exception:  # noqa: BLE001
+        doc = {"models": {}}
+    rates = {}
+    for m in (doc.get("models") or {}).values():
+        if m.get("provider") == "modelark":
+            ce = m.get("cap_equivalent") or {}
+            for n in [m.get("id"), *(m.get("served_as") or [])]:
+                rates[str(n).lower()] = (float(ce.get("input") or 0), float(ce.get("output") or 0),
+                                         float(ce.get("cache_read") or 0))
+    _Z = lambda: {"billed_usd": 0.0, "capeq_usd": 0.0, "calls": 0.0, "input": 0.0,
+                  "output": 0.0, "cache_read": 0.0}
+    out: Dict[str, dict] = {}
+    for (prof, model, host, base, task, bprov, n, inp, output, cr, cw, cost, src, fs, ls) in _usage_rows(root, since, now):
+        b = base or ""
+        if "bytepluses.com" in b or src in ("modelark subscription", "modelark-proxy"):
+            who = "modelark"
+        elif "api.deepseek.com" in b:
+            who = "deepseek"
+        elif "openrouter.ai" in b:
+            who = "openrouter"
+        else:
+            who = (bprov or "other").lower() or "other"
+        d = out.setdefault(who, _Z())
+        if who == "modelark":
+            r = rates.get((model or "").lower()) or ((0.66, 1.98, 0.022) if "pro" in (model or "") else (0.15, 0.60, 0.003))
+            d["capeq_usd"] += ((inp + cw) * r[0] + output * r[1] + cr * r[2]) / 1e6
+        else:
+            d["billed_usd"] += float(cost or 0)
+        d["calls"] += float(n or 0); d["input"] += inp; d["output"] += output; d["cache_read"] += cr
+    return out
+
+
+def _or_get(path: str, key: str) -> dict:
+    req = urllib.request.Request("https://openrouter.ai/api/v1/" + path,
+                                 headers={"Authorization": f"Bearer {key}", **_UA})
+    with urllib.request.urlopen(req, timeout=12) as r:
+        return json.loads(r.read().decode()).get("data") or {}
+
+
+def _openrouter_balance(root: Path, spend: Dict[str, dict]) -> dict:
+    """Prepaid credit and an optional monthly limit, read live from the same key the fleet routes
+    on — no management key required. Nothing here is hardcoded: Richie raises the limit and tops up
+    credit as capacity requires, and a watchdog that is confidently wrong about money is worse than
+    none. Whichever pot empties first is the one reported, which is the same rule budget-watch has
+    used since 2026-08-28 (on 28 Aug the monthly limit had $45.31 left while credit had $20.22)."""
+    out: dict = {"billing": "metered", "cost_basis": "invoiced per call by OpenRouter; balance is prepaid credit"}
+    key = _env_key("OPENROUTER_API_KEY")
+    credits = used = limit = limit_remaining = None
+    if key:
+        try:
+            c = _or_get("credits", key); k = _or_get("key", key)
+            credits, used = c.get("total_credits"), c.get("total_usage")
+            limit, limit_remaining = k.get("limit"), k.get("limit_remaining")
+            # OpenRouter's own invoiced total for today, next to our telemetry estimate. The two
+            # were reconciled to 99.9% over five weeks on 2026-08-28; showing both is what would
+            # catch that agreement breaking down.
+            out["invoiced_today_usd"] = k.get("usage_daily")
+            out["invoiced_month_usd"] = k.get("usage_monthly")
+            out["limit_reset"] = k.get("limit_reset")
+            out["source"] = "api"
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = str(exc)[:160]
+    else:
+        out["error"] = "OPENROUTER_API_KEY not available to the dashboard process"
+    balance = (credits - used) if (credits is not None and used is not None) else None
+    if balance is None:
+        # budget-watch reads the same two endpoints hourly and records what it saw. Falling back to
+        # its heartbeat keeps the card honest during an OpenRouter outage instead of showing blank.
+        try:
+            hb = json.loads((root / "state" / "budget-watch-heartbeat.json").read_text())
+            if hb.get("balance") is not None:
+                balance = float(hb["balance"]); out["source"] = "budget-watch heartbeat"
+                out["at"] = hb.get("at")
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        out["at"] = time.time()
+    pots = [(n, v) for n, v in (("credit balance", balance), ("monthly limit", limit_remaining)) if v is not None]
+    binding, headroom = min(pots, key=lambda p: p[1]) if pots else (None, None)
+    per_h = (spend.get("openrouter", {}).get("billed_usd", 0.0)) / 72.0
+    out.update({
+        "balance_usd": balance, "credits_purchased_usd": credits, "credits_used_usd": used,
+        "limit_usd": limit, "limit_remaining_usd": limit_remaining,
+        "binding": binding, "headroom_usd": headroom,
+        "burn_usd_per_h": round(per_h, 4),
+        "runway_h": (round(headroom / per_h, 1) if (headroom is not None and per_h > 0) else None),
+        "window_spent_usd": round(spend.get("openrouter", {}).get("billed_usd", 0.0), 4),
+        "window_hours": 72,
+    })
+    return out
+
+
+def _modelark_quota(root: Path, spend: Dict[str, dict]) -> dict:
+    """ModelArk has no balance, and that is a finding rather than an omission.
+
+    The Coding Plan is a flat subscription: marginal cost is $0, so there is no pot to drain and no
+    dollar figure that would be true. Probed on 2026-09-15 against the live key:
+    `/api/coding/v3/usage`, `/quota` and `/subscription` all answer 200 with an EMPTY body — and so
+    does a nonsense path, which is what proves they do not exist; a real completion comes back with
+    no ratelimit or quota headers of any kind. Volcengine's billing OpenAPI would answer this, but
+    it needs an AK/SK pair signed per request and the fleet holds only an `ark-` API key (1Password
+    carries no access-key item). Inventing a balance here would be the exact failure budget-watch
+    was written to prevent.
+
+    What IS knowable is reported instead: whether the 5-hour rolling bucket is currently exhausted
+    (modelark-quota-watch parses the reset time straight out of the 429), and what the subscription
+    served in the last 5 hours valued at the metered rate it displaced."""
+    out = {
+        "billing": "subscription",
+        "balance_usd": None,
+        "balance_available": False,
+        "why_no_balance": ("flat subscription — BytePlus exposes no quota or balance endpoint on an "
+                           "ark- key (probed 2026-09-15), and the billing OpenAPI needs an AK/SK pair "
+                           "the fleet does not hold"),
+        "cost_basis": "not invoiced per call; the dollar figure shown is cap-equivalent — what this traffic would have cost on the metered route",
+        "quota_window_h": 5,
+    }
+    st = {}
+    try:
+        st = json.loads((root / "state" / "modelark-quota.json").read_text()) or {}
     except Exception:  # noqa: BLE001
         pass
+    out["exhausted"] = bool(st.get("exhausted"))
+    out["reset_at"] = st.get("reset_at")
+    out["last_event_at"] = st.get("at") or st.get("last_seen")
+    w = _provider_spend(root, 5).get("modelark", {})
+    out.update({
+        "window_calls": int(w.get("calls", 0)),
+        "window_capeq_usd": round(w.get("capeq_usd", 0.0), 4),
+        "window_input": int(w.get("input", 0)),
+        "window_output": int(w.get("output", 0)),
+        "window_cache_read": int(w.get("cache_read", 0)),
+        "day_capeq_usd": round(spend.get("modelark", {}).get("capeq_usd", 0.0), 2),
+    })
+    try:
+        hb = json.loads((root / "state" / "modelark-watch.json").read_text())
+        out.setdefault("last_event_at", hb.get("at"))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _deepseek_balance(root: Path, spend: Dict[str, dict]) -> Optional[dict]:
+    """DeepSeek returns no per-call cost, so every Hermes number for that rung is an estimate from
+    the published rate card. `/user/balance` — same key, no second credential — is the invoice side,
+    and scripts/deepseek-balance-watch.py records it. Surfacing both is what stops a metered
+    provider reading as a free one."""
+    try:
+        st = json.loads((root / "state" / "deepseek-balance.json").read_text())
+    except Exception:  # noqa: BLE001
+        return None
+    return {
+        "billing": "metered",
+        "balance_usd": st.get("balance_usd"),
+        "cumulative_spent_usd": st.get("cumulative_spent_usd"),
+        "window_spent_usd": st.get("window_spent_usd"),
+        "window_estimated_usd": st.get("window_estimated_usd"),
+        "at": st.get("at"),
+        "available": st.get("available"),
+        "day_estimated_usd": round(spend.get("deepseek", {}).get("billed_usd", 0.0), 4),
+        "cost_basis": "estimated per call from the published rate card; balance is the invoice side",
+    }
+
+
+def _direct_provider_balances(root: Path) -> dict:
+    """All three providers in one shape, cached briefly — /state is polled by the open page and two
+    of these make outbound calls. Each entry says its own billing model, because the three are
+    genuinely different: prepaid credit, metered postpay, and a flat subscription with no balance
+    at all. A provider that cannot be read is omitted rather than shown as zero."""
+    with _BAL_LOCK:
+        if _BAL["data"] is not None and (time.time() - _BAL["at"]) < _BAL_TTL:
+            return _BAL["data"]
+    out: dict = {}
+    try:
+        spend = _provider_spend(root, 72)
+    except Exception:  # noqa: BLE001
+        spend = {}
+    for name, fn in (("openrouter", _openrouter_balance), ("deepseek", _deepseek_balance),
+                     ("modelark", _modelark_quota)):
+        try:
+            v = fn(root, spend)
+            if v:
+                out[name] = v
+        except Exception:  # noqa: BLE001
+            continue
+    with _BAL_LOCK:
+        _BAL["at"] = time.time(); _BAL["data"] = out
     return out
 
 

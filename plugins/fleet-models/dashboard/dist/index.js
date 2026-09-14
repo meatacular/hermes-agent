@@ -147,8 +147,74 @@
           wantsVision
         }
       ));
-    }, Stat2 = function({ label, value, sub, tone }) {
-      return /* @__PURE__ */ h("div", { className: cls2("fm-stat", tone && "fm-stat--" + tone) }, /* @__PURE__ */ h("div", { className: "fm-stat-label" }, label), /* @__PURE__ */ h("div", { className: "fm-stat-value" }, value), sub ? /* @__PURE__ */ h("div", { className: "fm-stat-sub" }, sub) : null);
+    }, Stat2 = function({ label, value, sub, tone, title }) {
+      return /* @__PURE__ */ h("div", { className: cls2("fm-stat", tone && "fm-stat--" + tone), title }, /* @__PURE__ */ h("div", { className: "fm-stat-label" }, label), /* @__PURE__ */ h("div", { className: "fm-stat-value" }, value), sub ? /* @__PURE__ */ h("div", { className: "fm-stat-sub" }, sub) : null);
+    }, relAge2 = function(ts) {
+      if (!ts) return null;
+      const m = Math.round(Date.now() / 1e3 - ts) / 60;
+      return m < 1 ? "just now" : m < 60 ? Math.round(m) + "m ago" : Math.round(m / 60) + "h ago";
+    }, BalanceStats2 = function({ balances, T }) {
+      if (!balances) return null;
+      const or = balances.openrouter, ds = balances.deepseek, ma = balances.modelark;
+      const spent = (k) => T && T.by_payer && T.by_payer[k] || null;
+      const cards = [];
+      if (or && or.balance_usd != null) {
+        const low = or.runway_h != null && or.runway_h < 48;
+        cards.push(
+          /* @__PURE__ */ h(
+            Stat2,
+            {
+              key: "or",
+              tone: low ? "warn" : "or",
+              label: "OpenRouter credit",
+              value: money(or.balance_usd, 2) + " left",
+              title: [
+                or.credits_purchased_usd != null ? money(or.credits_purchased_usd, 2) + " bought, " + money(or.credits_used_usd, 2) + " used" : null,
+                or.invoiced_today_usd != null ? "OpenRouter invoiced " + money(or.invoiced_today_usd, 2) + " today" : null,
+                "burn " + money(or.burn_usd_per_h, 3) + "/h over " + or.window_hours + "h",
+                or.source === "api" ? "read live from the OpenRouter API" : "from the budget-watch heartbeat " + (relAge2(or.at) || "")
+              ].filter(Boolean).join(" \xB7 "),
+              sub: [
+                or.limit_remaining_usd != null ? money(or.limit_remaining_usd, 2) + " of " + money(or.limit_usd, 2) + " monthly" : null,
+                or.runway_h != null ? Math.round(or.runway_h) + "h runway on the " + or.binding : null
+              ].filter(Boolean).join(" \xB7 ") || "prepaid credit"
+            }
+          )
+        );
+      }
+      if (ds) {
+        const w = spent("deepseek");
+        cards.push(
+          /* @__PURE__ */ h(
+            Stat2,
+            {
+              key: "ds",
+              tone: "ds",
+              label: "DeepSeek credit",
+              value: ds.balance_usd != null ? money(ds.balance_usd, 2) + " left" : "\u2014",
+              title: ds.cost_basis + (ds.at ? " \xB7 read " + relAge2(ds.at) : ""),
+              sub: "metered \xB7 " + (w ? money(w.billed_usd, 4) + " estimated this window" : "no calls this window")
+            }
+          )
+        );
+      }
+      if (ma) {
+        cards.push(
+          /* @__PURE__ */ h(
+            Stat2,
+            {
+              key: "ma",
+              tone: ma.exhausted ? "warn" : "sub",
+              label: "ModelArk quota",
+              value: ma.exhausted ? "Exhausted" : "Available",
+              title: ma.why_no_balance + " \xB7 " + ma.cost_basis,
+              sub: (ma.exhausted && ma.reset_at ? "resets " + ma.reset_at + " \xB7 " : "no balance to read \xB7 ") + num(ma.window_calls) + " calls in " + ma.quota_window_h + "h \xB7 " + money(ma.window_capeq_usd, 2) + " cap-equivalent"
+            }
+          )
+        );
+      }
+      if (!cards.length) return null;
+      return /* @__PURE__ */ h("div", { className: "fm-stats fm-stats--bal" }, cards);
     }, Badge2 = function({ tone, children, title }) {
       return /* @__PURE__ */ h("span", { className: cls2("fm-badge", tone && "fm-badge--" + tone), title }, children);
     }, Section2 = function({ title, right, children, className }) {
@@ -285,7 +351,7 @@
           sub: costSub(T),
           tone: "money"
         }
-      ), /* @__PURE__ */ h(Stat2, { label: "ModelArk subscription", value: k(tot.ma, (v) => num(v) + " calls"), sub: tot.calls ? Math.round(100 * tot.ma / tot.calls) + "% of all calls \xB7 $0" : "$0", tone: "sub" }), /* @__PURE__ */ h(Stat2, { label: "Registry", value: Object.keys(models).length + " models", sub: Object.values(models).filter((m) => m.provider === "modelark").length + " subscription \xB7 " + Object.values(models).filter((m) => m.provider === "openrouter").length + " OpenRouter" }), /* @__PURE__ */ h(Stat2, { label: "Sync", value: Object.keys(state.drift || {}).length ? Object.keys(state.drift).length + " drifted" : "all 9 in sync", tone: Object.keys(state.drift || {}).length ? "warn" : "ok", sub: "revision " + state.revision })), /* @__PURE__ */ h("div", { className: "fm-grid" }, state.profiles.map((p) => /* @__PURE__ */ h(
+      ), /* @__PURE__ */ h(Stat2, { label: "ModelArk subscription", value: k(tot.ma, (v) => num(v) + " calls"), sub: tot.calls ? Math.round(100 * tot.ma / tot.calls) + "% of all calls \xB7 $0" : "$0", tone: "sub" }), /* @__PURE__ */ h(Stat2, { label: "Registry", value: Object.keys(models).length + " models", sub: Object.values(models).filter((m) => m.provider === "modelark").length + " subscription \xB7 " + Object.values(models).filter((m) => m.provider === "openrouter").length + " OpenRouter" }), /* @__PURE__ */ h(Stat2, { label: "Sync", value: Object.keys(state.drift || {}).length ? Object.keys(state.drift).length + " drifted" : "all 9 in sync", tone: Object.keys(state.drift || {}).length ? "warn" : "ok", sub: "revision " + state.revision })), /* @__PURE__ */ h(BalanceStats2, { balances: state.balances, T }), /* @__PURE__ */ h("div", { className: "fm-grid" }, state.profiles.map((p) => /* @__PURE__ */ h(
         AgentCard2,
         {
           key: p,
@@ -657,15 +723,7 @@
           tone: "ok",
           sub: `${tok(T.cache_read)} of ${tok((T.input || 0) + (T.cache_read || 0))} prompt tokens`
         }
-      ), /* @__PURE__ */ h(Stat2, { label: "ModelArk subscription", value: num(tot.ma) + " calls", tone: "sub", sub: "$0 \xB7 cap-equivalent " + money(tot.cap, 2) }), /* @__PURE__ */ h(Stat2, { label: "All calls", value: num(tot.calls), sub: payerSub(T) }), balances && balances.deepseek ? /* @__PURE__ */ h(
-        Stat2,
-        {
-          label: "DeepSeek direct",
-          tone: "ds",
-          value: balances.deepseek.balance_usd != null ? money(balances.deepseek.balance_usd, 2) + " left" : "\u2014",
-          sub: "metered \xB7 " + (T.by_payer && T.by_payer.deepseek ? money(T.by_payer.deepseek.billed_usd, 4) + " estimated this window" : "no calls this window")
-        }
-      ) : null), /* @__PURE__ */ h(Section2, { title: "Over time", right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, bucketName(usage.bucket), " bars \xB7 tap or hover a bar") }, /* @__PURE__ */ h(TimeChart2, { usage, width }), /* @__PURE__ */ h("p", { className: "fm-muted fm-small fm-tc-foot" }, "From all nine ledgers. Each session's usage is spread evenly between its first and last call, so short windows are close estimates. Faded bars are part-way through.")), /* @__PURE__ */ h("div", { className: "fm-two" }, /* @__PURE__ */ h(Section2, { title: `Spend by agent \xB7 ${periodShort(win)}`, right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, "bar = billed $ \xB7 teal = subscription calls") }, /* @__PURE__ */ h(BarList2, { rows: Object.entries(byAgent).map(([p, rs]) => ({
+      ), /* @__PURE__ */ h(Stat2, { label: "ModelArk subscription", value: num(tot.ma) + " calls", tone: "sub", sub: "$0 \xB7 cap-equivalent " + money(tot.cap, 2) }), /* @__PURE__ */ h(Stat2, { label: "All calls", value: num(tot.calls), sub: payerSub(T) })), /* @__PURE__ */ h(BalanceStats2, { balances, T }), /* @__PURE__ */ h(Section2, { title: "Over time", right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, bucketName(usage.bucket), " bars \xB7 tap or hover a bar") }, /* @__PURE__ */ h(TimeChart2, { usage, width }), /* @__PURE__ */ h("p", { className: "fm-muted fm-small fm-tc-foot" }, "From all nine ledgers. Each session's usage is spread evenly between its first and last call, so short windows are close estimates. Faded bars are part-way through.")), /* @__PURE__ */ h("div", { className: "fm-two" }, /* @__PURE__ */ h(Section2, { title: `Spend by agent \xB7 ${periodShort(win)}`, right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, "bar = billed $ \xB7 teal = subscription calls") }, /* @__PURE__ */ h(BarList2, { rows: Object.entries(byAgent).map(([p, rs]) => ({
         label: (doc.agents[p] || {}).name || p,
         billed: rs.reduce((a, r) => a + r.billed_usd, 0),
         calls: rs.reduce((a, r) => a + r.calls, 0),
@@ -908,7 +966,7 @@
         }
       ) : null, flash ? /* @__PURE__ */ h("div", { className: cls2("fm-flash", "fm-flash--" + flash.tone) }, flash.msg) : null);
     };
-    tickLabel = tickLabel2, isTick = isTick2, rangeLabel = rangeLabel2, cls = cls2, Pill = Pill2, Chain = Chain2, RungPicker = RungPicker2, ChainEditor = ChainEditor2, Stat = Stat2, Badge = Badge2, Section = Section2, PeriodBar = PeriodBar2, Spark = Spark2, TimeChart = TimeChart2, helperGroups = helperGroups2, AgentCard = AgentCard2, usageByProfile = usageByProfile2, FleetView = FleetView2, LiveChain = LiveChain2, SlotRow = SlotRow2, listInput = listInput2, parseList = parseList2, AgentView = AgentView2, usedBy = usedBy2, HostTable = HostTable2, ModelDetail = ModelDetail2, AddModel = AddModel2, ModelsView = ModelsView2, CostsView = CostsView2, BarList = BarList2, DecisionsView = DecisionsView2, PlanPanel = PlanPanel2, ModelsPage = ModelsPage2;
+    tickLabel = tickLabel2, isTick = isTick2, rangeLabel = rangeLabel2, cls = cls2, Pill = Pill2, Chain = Chain2, RungPicker = RungPicker2, ChainEditor = ChainEditor2, Stat = Stat2, relAge = relAge2, BalanceStats = BalanceStats2, Badge = Badge2, Section = Section2, PeriodBar = PeriodBar2, Spark = Spark2, TimeChart = TimeChart2, helperGroups = helperGroups2, AgentCard = AgentCard2, usageByProfile = usageByProfile2, FleetView = FleetView2, LiveChain = LiveChain2, SlotRow = SlotRow2, listInput = listInput2, parseList = parseList2, AgentView = AgentView2, usedBy = usedBy2, HostTable = HostTable2, ModelDetail = ModelDetail2, AddModel = AddModel2, ModelsView = ModelsView2, CostsView = CostsView2, BarList = BarList2, DecisionsView = DecisionsView2, PlanPanel = PlanPanel2, ModelsPage = ModelsPage2;
     const { React } = SDK;
     const h = React.createElement;
     const Fragment = React.Fragment;
@@ -1061,6 +1119,8 @@
   var RungPicker;
   var ChainEditor;
   var Stat;
+  var relAge;
+  var BalanceStats;
   var Badge;
   var Section;
   var PeriodBar;
