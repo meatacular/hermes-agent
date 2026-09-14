@@ -87,7 +87,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
@@ -112,6 +112,7 @@ RULE_NO_PARENTS = "no_parents"
 RULE_PENDING = "parents_pending"
 RULE_NO_MARKER = "no_marker"
 RULE_RELEASE = "dependency_wait"
+RULE_RE_BLOCKED = "re_blocked"
 RULE_UNBLOCK_FAILED = "unblock_failed"
 
 MARKER_DEPENDENCY = "dependency-wait"
@@ -208,6 +209,40 @@ def announced_before(history, tid, rule):
     return False
 
 
+RELEASE_LOOP_WINDOW_H = 24
+
+
+def released_before(history, tid, within_hours=RELEASE_LOOP_WINDOW_H):
+    """When this watchdog released this card in the last `within_hours`, return that run's
+    timestamp; otherwise None.
+
+    Why this exists (2026-09-15, t_796c3fab): under the no-mandatory-holds rule this watchdog
+    releases a standalone hold. If the card then comes straight back as `operator_hold` — because
+    a worker hit it, blocked, and overwatch re-held it — releasing it again just runs the same
+    worker into the same wall and bills for it. That is the churn Richie is trying to stop, and it
+    is the loop the kernel already breaks elsewhere by routing repeat blocks to triage.
+
+    So: release once. A card that comes BACK is not a stalled hold, it is a card the board is
+    telling us it cannot do. Hold it, say so once, and let Richie decide. This is a loop breaker,
+    not a re-introduced approval gate — it can only ever fire on a card this watchdog itself
+    already released, and it expires after a day so an unrelated later block is not caught by it.
+    """
+    cutoff = datetime.now() - timedelta(hours=within_hours)
+    for run in reversed(history):
+        if not isinstance(run, dict):
+            continue
+        try:
+            when = datetime.fromisoformat(run.get("run_at") or "")
+        except ValueError:
+            continue
+        if when < cutoff:
+            break                       # history is append-only, so everything older is older
+        for entry in run.get("released") or []:
+            if isinstance(entry, dict) and entry.get("id") == tid and not entry.get("dry_run"):
+                return run.get("run_at")
+    return None
+
+
 def _skip(tid, title, rule, detail, skipped):
     """Record a hold. ``reason`` is kept alongside ``rule`` for the older
     state-file format; both are the same value."""
@@ -228,8 +263,14 @@ def _do_release(tid, title, parents, rule, why, released, skipped, lines):
         released.append({"id": tid, "title": title, "parents": parents,
                          "rule": rule, "dry_run": True})
         return
+    # 2026-09-15: `unblock` with no --reason writes an event whose payload is None — no author, no
+    # mechanism. Overwatch found exactly that on t_796c3fab and could not tell what had released a
+    # card that said it was held ("unblocked at event 17803 with payload=None"). The CLI records a
+    # --reason as an `UNBLOCK: …` comment authored by the running profile, so the board itself now
+    # carries the answer instead of it living only in a Slack message.
     result = subprocess.run(
-        [str(HERMES_BIN), "kanban", "unblock", tid],
+        [str(HERMES_BIN), "kanban", "unblock", "--reason",
+         f"release-operator-hold-watch [{rule}]: {why}", tid],
         capture_output=True, text=True, timeout=30
     )
     if result.returncode == 0:
@@ -286,6 +327,20 @@ def main():
             _skip(tid, title, RULE_MANUAL,
                   "explicit `operator-hold: manual` — a human must release this",
                   skipped)
+            continue
+
+        # 2b. this watchdog already released this card and it came back blocked — loop breaker.
+        #     Checked BEFORE the parent rules so no release path can bypass it.
+        prior = released_before(history, tid)
+        if prior:
+            _skip(tid, title, RULE_RE_BLOCKED,
+                  f"released at {prior} and blocked again — not releasing a second time", skipped)
+            if not announced_before(history, tid, RULE_RE_BLOCKED):
+                announced.append({"id": tid, "title": title, "rule": RULE_RE_BLOCKED,
+                                  "detail": f"released at {prior}, came back blocked"})
+                lines.append(f"HOLD [{RULE_RE_BLOCKED}] {tid} — {title} "
+                             f"(released at {prior}, came straight back blocked; "
+                             f"a second release would just re-run the same failure)")
             continue
 
         # 3. dependency parents
