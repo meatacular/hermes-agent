@@ -1,0 +1,49 @@
+name: kanban-worktree-carryover
+version: 1.0.0
+kind: backend
+author: Agent Smith (WeRoll fleet), 2026-09-14
+description: >-
+  A retry must never be handed a worktree cut from base while the card's own
+  earlier branch — holding the implementation its reviewer already read —
+  still exists in another local clone.
+
+  The defect (t_b7585516, from the t_ae9459c0 overwatch): the dispatcher
+  materialises a worktree card at `<repo>/.worktrees/<task-id>` and reuses the
+  task's existing branch when it is present. That reuse is correct and is why
+  an ordinary retry does keep its commits. It breaks when the card's resolved
+  repo CHANGES between runs: on 2026-09-14 a live card's hardcoded
+  workspace_path was cleared (the standard "point the card back at the
+  canonical clone" remedy) while the card was mid retry-cycle, so the next
+  spawn landed in the canonical clone, found no such branch there, cut a fresh
+  one from HEAD, and Bob reported "the retry workspace/branch is reset to
+  aa2b25c and contains none of the previously implemented files or commits".
+  The commits were never destroyed — they sat on the same-named branch of the
+  other clone, invisible — but the worker, the reviewer and the board all
+  behaved as if the implementation had been wiped, and it took a manual
+  cherry-pick to recover. The same clone-flip is visible on a sibling card
+  five minutes apart (t_5262a7a8: stale clone 17:15:13, canonical 17:20:15).
+
+  Subscribes to `kanban_task_claimed`, which the kernel fires AFTER the claim
+  commits and immediately BEFORE the dispatcher resolves and materialises the
+  workspace — the last moment at which the branch can be made to exist. It
+  fetches the card's branch into the target repo from the clones the card's
+  own event history records, or from `origin`, so the kernel's existing-branch
+  reuse then checks it out with its commits.
+
+  Deliberately narrow (a control that fires on legitimate cards is worse than
+  the defect):
+    * worktree cards only, and only when the branch is ABSENT in the target
+      repo — a present branch already reuses correctly and is left alone;
+    * only for a card with more than one run, so a first provision is never
+      touched and still creates from base (regression AC3);
+    * the fetch only ever CREATES a missing local ref (`refs/heads/x:refs/heads/x`
+      cannot overwrite an existing one) and never touches a working tree,
+      index or HEAD;
+    * fail-open by construction — any exception, missing DB, unreadable board
+      metadata or git failure returns without changing anything.
+
+  kind: backend so it loads in every profile and in the dispatcher.
+
+  Kill switch: HERMES_KANBAN_WORKTREE_CARRYOVER=0 disables it without a revert.
+provides_hooks:
+  - kanban_task_claimed
