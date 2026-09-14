@@ -1,5 +1,5 @@
 name: kanban-worktree-carryover
-version: 1.0.0
+version: 1.1.0
 kind: backend
 author: Agent Smith (WeRoll fleet), 2026-09-14
 description: >-
@@ -43,6 +43,23 @@ description: >-
       metadata or git failure returns without changing anything.
 
   kind: backend so it loads in every profile and in the dispatcher.
+
+  1.1.0 (t_2a901db6, the follow-ups to the t_8c1986b6 review — both were ways
+  the plugin could be quietly ABSENT):
+    * board discovery now mirrors `kanban_home()`: HERMES_KANBAN_HOME else the
+      ROOT home, so `HERMES_HOME=<root>/profiles/<name>` resolves BACK to
+      `<root>`. Returning HERMES_HOME verbatim made the guard inert in every
+      profile-owned dispatcher — it looked for the board inside the profile
+      directory and reported "no board db holds this task" for a board it had
+      never looked at. brain/switch/axel have each held the machine-global
+      dispatcher lease, and non-root ownership is supported on purpose.
+    * the remote candidate is ref-only and LOCAL: it is cut from the
+      remote-tracking ref `plan()` already proved local, and nothing fetches.
+      This hook runs inline under the machine-global dispatch lock, where a
+      fetch was up to MAX_SOURCES x GIT_TIMEOUT (80 s) of stall for no gain.
+    * events recording `previous_workspace_path` / `old_workspace_path` are
+      candidate SOURCES (newest first); they are not target anchors — the target
+      still comes from the card's `workspace_path` or the board `default_workdir`.
 
   Kill switch: HERMES_KANBAN_WORKTREE_CARRYOVER=0 disables it without a revert.
 provides_hooks:
