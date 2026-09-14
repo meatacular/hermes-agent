@@ -362,3 +362,42 @@
 .fm-rungpick-row:disabled { opacity: .45; cursor: default; }
 .fm-rungpick-id { font-weight: 600; color: var(--color-foreground); }
 .fm-rungpick-meta { font-size: 11.5px; color: var(--color-muted-foreground); }
+
+/* ── Home + decision log (2026-09-15) ───────────────────────────────────────────────────────
+   Every colour is a theme token or one of the four fixed accents declared at the top. The build
+   gate rejects an undefined --fm- var and a var() whose fallback is a raw hex, which is how the
+   unreadable rung picker got shipped once. */
+.fm-warnblock .fm-note { margin: 0 0 6px; }
+.fm-warnblock .fm-note:last-child { margin-bottom: 0; }
+
+.fm-kv { display: grid; gap: 2px; }
+.fm-kv > div { display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
+  padding: 5px 0; border-bottom: 1px solid var(--fm-line); }
+.fm-kv > div:last-child { border-bottom: 0; }
+.fm-kv span { color: color-mix(in srgb, var(--color-foreground) 62%, transparent); }
+.fm-kv b { font-variant-numeric: tabular-nums; }
+
+.fm-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.is-dim { opacity: .5; }
+.fm-bar > span.is-over { background: var(--color-destructive); }
+
+/* The log is deliberately quieter than the live components above it — it is a record, not state. */
+.fm-dlog { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.fm-dlog-item { display: grid; grid-template-columns: 132px 1fr; gap: 12px;
+  padding: 9px 0; border-bottom: 1px solid var(--fm-line); }
+.fm-dlog-item:last-child { border-bottom: 0; }
+.fm-dlog-meta { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.fm-dlog-date { font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--color-foreground) 58%, transparent); }
+.fm-dlog-by { font-size: 11px; letter-spacing: .02em; padding: 1px 6px; border-radius: 99px;
+  background: var(--fm-soft); color: color-mix(in srgb, var(--color-foreground) 70%, transparent); }
+.fm-dlog-by--richie { background: var(--fm-or-soft); color: var(--fm-or); }
+.fm-dlog-by--measured { background: var(--fm-sub-soft); color: var(--fm-sub); }
+.fm-dlog-what { font-weight: 600; }
+.fm-dlog-why { margin-top: 2px;
+  color: color-mix(in srgb, var(--color-foreground) 66%, transparent); }
+
+@media (max-width: 640px) {
+  .fm-dlog-item { grid-template-columns: 1fr; gap: 4px; }
+  .fm-dlog-meta { flex-direction: row; align-items: center; gap: 8px; }
+}

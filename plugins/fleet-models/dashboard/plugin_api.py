@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -610,6 +611,277 @@ def _direct_provider_balances(root: Path) -> dict:
     return out
 
 
+# ── Home ─────────────────────────────────────────────────────────────────────────────────────
+# 2026-09-15 (Richie): "the 'fleet' homepage seems to duplicate information on other tabs. remove
+# it and replace with a home tab that provides relevant information highlights, updates, and
+# warnings that are not duplicated elsewhere."
+#
+# The discipline for this endpoint: every number here must be one you cannot read off Costs,
+# Models or Agents. Totals, per-agent spend and per-model spend all live on Costs — so none of
+# them are repeated. What Home adds is per-CARD economics (the unit Richie actually manages),
+# efficiency (a ratio, not a total), and the two clocks: how long until a worker hits its cap, and
+# how long until the money runs out.
+_CARD_RE = re.compile(r"\bt_[0-9a-f]{6,12}\b")
+_EFF_MIN_OUTPUT = 50_000      # below this a model "wins" on three lucky calls, not on efficiency
+
+
+def _kanban(root: Path) -> Optional[sqlite3.Connection]:
+    db = root / "kanban.db"
+    if not db.is_file():
+        return None
+    try:
+        return sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+
+
+def _ark_rates(root: Path) -> Dict[str, tuple]:
+    try:
+        doc = _core().load_doc(root)
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for m in (doc.get("models") or {}).values():
+        if m.get("provider") != "modelark":
+            continue
+        ce = m.get("cap_equivalent") or {}
+        for n in [m.get("id"), *(m.get("served_as") or [])]:
+            out[str(n).lower()] = (float(ce.get("input") or 0), float(ce.get("output") or 0),
+                                   float(ce.get("cache_read") or 0))
+    return out
+
+
+def _card_rollup(root: Path, since: float, now: float) -> Dict[str, dict]:
+    """{card id: {usd, capeq, tokens, output, calls, profiles, sessions}} from the `sessions` table.
+
+    The card id is parsed out of the session TITLE ("Work kanban task t_abc12345", "OVERWATCH:
+    kanban card t_abc12345 blocked…"), which is the same join `overwatch-cost-watch` uses and the
+    only one available — session rows carry no task_id column. A session that names no card is
+    skipped rather than averaged in, so "cost per card" means cost per card and not cost per
+    session.
+    """
+    rates = _ark_rates(root)
+    out: Dict[str, dict] = {}
+    for prof, db in _ledgers(root):
+        try:
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            q = ("SELECT COALESCE(title,''), COALESCE(model,''), COALESCE(billing_base_url,''), "
+                 "COALESCE(cost_source,''), COALESCE(input_tokens,0), COALESCE(output_tokens,0), "
+                 "COALESCE(cache_read_tokens,0), COALESCE(cache_write_tokens,0), "
+                 "COALESCE(api_call_count,0), "
+                 "CASE WHEN COALESCE(actual_cost_usd,0) > 0 THEN actual_cost_usd "
+                 "     ELSE COALESCE(estimated_cost_usd,0) END "
+                 "FROM sessions WHERE COALESCE(started_at, 0) >= ? AND COALESCE(started_at, 0) <= ?")
+            for title, model, base, src, inp, outp, cr, cw, calls, cost in c.execute(q, (since, now)):
+                m = _CARD_RE.search(title or "")
+                if not m:
+                    continue
+                tid = m.group(0)
+                d = out.setdefault(tid, {"usd": 0.0, "capeq": 0.0, "input": 0.0, "output": 0.0,
+                                         "cache_read": 0.0, "calls": 0.0, "sessions": 0,
+                                         "profiles": set()})
+                ark = "bytepluses.com" in base or src in ("modelark subscription", "modelark-proxy")
+                if ark:
+                    r = rates.get((model or "").lower()) or (
+                        (0.66, 1.98, 0.022) if "pro" in (model or "") else (0.15, 0.60, 0.003))
+                    d["capeq"] += ((inp + cw) * r[0] + outp * r[1] + cr * r[2]) / 1e6
+                else:
+                    d["usd"] += float(cost or 0)
+                d["input"] += inp; d["output"] += outp; d["cache_read"] += cr
+                d["calls"] += calls; d["sessions"] += 1; d["profiles"].add(prof)
+            c.close()
+        except sqlite3.Error:
+            continue
+    for d in out.values():
+        d["profiles"] = sorted(d["profiles"])
+    return out
+
+
+def _cap_pressure(root: Path) -> dict:
+    """How long until a worker hits its cap — the clock Richie asked for.
+
+    The cap is PER WORKER per card ($1.00 base, one extension to $1.50 each). A running card is
+    measured against its own assignee's ledger, which is what `enforce_max_cost` does, so this
+    agrees with the gate rather than approximating it. Burn is the card's own rate since its first
+    session started — not a fleet average — because that is what decides when THIS card trips.
+    """
+    base, ceiling = 1.0, 1.5
+    try:
+        caps = _caps(root)
+        base = float(caps.get("default_max_cost") or base)
+        ceiling = float(caps.get("max_cost_hard_ceiling") or caps.get("max_cost_ceiling") or ceiling)
+    except Exception:  # noqa: BLE001
+        pass
+    kb = _kanban(root)
+    if kb is None:
+        return {"cards": [], "base_usd": base, "ceiling_usd": ceiling}
+    try:
+        rows = kb.execute(
+            "SELECT id, title, assignee, COALESCE(max_cost, 0), started_at FROM tasks "
+            "WHERE status = 'running'").fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        kb.close()
+    now = time.time()
+    ledgers = dict(_ledgers(root))
+    out = []
+    for tid, title, assignee, cap, started in rows:
+        db = ledgers.get(assignee or "") or ledgers.get("root")
+        spend, first = 0.0, None
+        if db:
+            try:
+                c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+                r = c.execute("SELECT COALESCE(SUM(CASE WHEN COALESCE(actual_cost_usd,0) > 0 "
+                              "THEN actual_cost_usd ELSE COALESCE(estimated_cost_usd,0) END), 0), "
+                              "MIN(started_at) FROM sessions WHERE title LIKE ?",
+                              ("%" + tid + "%",)).fetchone()
+                c.close()
+                spend, first = float(r[0] or 0.0), r[1]
+            except sqlite3.Error:
+                pass
+        limit = float(cap or base) or base
+        elapsed_h = max((now - float(first)) / 3600.0, 1 / 60.0) if first else None
+        rate = (spend / elapsed_h) if elapsed_h else None
+        eta_h = ((limit - spend) / rate) if (rate and rate > 0 and spend < limit) else None
+        out.append({"id": tid, "title": title, "assignee": assignee, "spend_usd": round(spend, 4),
+                    "cap_usd": limit, "ceiling_usd": ceiling,
+                    "pct": round(100 * spend / limit, 1) if limit else None,
+                    "burn_usd_per_h": round(rate, 4) if rate else None,
+                    "eta_h": round(eta_h, 2) if eta_h is not None else None,
+                    "over": spend >= limit})
+    out.sort(key=lambda x: (x["eta_h"] is None, x["eta_h"] if x["eta_h"] is not None else 0))
+    return {"cards": out, "base_usd": base, "ceiling_usd": ceiling}
+
+
+def home(window: int = 7 * 86400, tz: Optional[str] = None, root: Optional[Path] = None) -> dict:
+    root = root or _root()
+    window = max(WINDOW_MIN, min(int(window), WINDOW_MAX))
+    now = time.time(); since = now - window
+    u = usage(window, tz=tz, root=root)
+    T = u.get("totals") or {}
+
+    # ── per-card economics — the unit Richie manages, and nowhere else on the dashboard ──
+    cards = _card_rollup(root, since, now)
+    n = len(cards)
+    tot_usd = sum(c["usd"] for c in cards.values())
+    tot_capeq = sum(c["capeq"] for c in cards.values())
+    tot_tok = sum(c["input"] + c["output"] + c["cache_read"] for c in cards.values())
+    per_card = sorted((c["usd"] + c["capeq"]) for c in cards.values())
+    median = (per_card[n // 2] if n % 2 else (per_card[n // 2 - 1] + per_card[n // 2]) / 2) if n else None
+    dearest = max(cards.items(), key=lambda kv: kv[1]["usd"] + kv[1]["capeq"], default=(None, None))
+    card_stats = {
+        "cards": n,
+        "billed_usd": round(tot_usd, 4),
+        "capeq_usd": round(tot_capeq, 4),
+        "avg_usd": round((tot_usd + tot_capeq) / n, 4) if n else None,
+        "avg_billed_usd": round(tot_usd / n, 4) if n else None,
+        "median_usd": round(median, 4) if median is not None else None,
+        "avg_tokens": int(tot_tok / n) if n else None,
+        # what a card's tokens cost, as a rate — comparable across cards of different sizes in a
+        # way that "$ per card" is not
+        "usd_per_mtok": round((tot_usd + tot_capeq) / (tot_tok / 1e6), 4) if tot_tok else None,
+        "multi_worker_cards": sum(1 for c in cards.values() if len(c["profiles"]) > 1),
+        "dearest": ({"id": dearest[0], "usd": round(dearest[1]["usd"] + dearest[1]["capeq"], 4),
+                     "workers": dearest[1]["profiles"]} if dearest[0] else None),
+    }
+
+    # ── most used, and most efficient ────────────────────────────────────────────────────────
+    # From usage()'s own rows, so Home and Costs cannot disagree about the same model.
+    agg: Dict[str, dict] = {}
+    for r in (u.get("rows") or []):
+        a = agg.setdefault(r.get("model") or "?", {"billed": 0.0, "capeq": 0.0, "calls": 0.0,
+                                                   "input": 0.0, "output": 0.0, "cache_read": 0.0,
+                                                   "sub": False})
+        a["billed"] += float(r.get("billed_usd") or 0)
+        a["capeq"] += float(r.get("cap_equivalent_usd") or 0)
+        a["calls"] += float(r.get("calls") or 0)
+        a["input"] += float(r.get("input") or 0)
+        a["output"] += float(r.get("output") or 0)
+        a["cache_read"] += float(r.get("cache_read") or 0)
+        a["sub"] = a["sub"] or bool(r.get("modelark"))
+    most_used = max(agg, key=lambda m: agg[m]["calls"], default=None)
+    most_used_share = (round(100 * agg[most_used]["calls"] / sum(a["calls"] for a in agg.values()), 1)
+                       if most_used and sum(a["calls"] for a in agg.values()) else None)
+
+    # EFFICIENCY — the proposed calculation, stated on the card so it can be argued with:
+    #   dollars per million OUTPUT tokens = (billed + cap-equivalent) / output × 1e6
+    # Output is the work. Input and cache reads are what it cost to get there, so a model that
+    # reads a big cached prefix cheaply SHOULD score well for it — which is the behaviour worth
+    # rewarding here. Three deliberate choices, each of which changes the ranking:
+    #   * subscription rungs are scored on cap-equivalent, not on the $0 they are invoiced.
+    #     Scoring them at $0 makes ModelArk infinitely efficient and the column meaningless.
+    #   * a model needs 50k output tokens in the window to be RANKED. Below that, three lucky
+    #     calls beat a workhorse and the leaderboard is noise.
+    #   * it is a rate, not a total, so a cheap model used constantly does not out-rank a cheap
+    #     model used once — that is what "most used" is for, next to it.
+    eff = []
+    for m, a in agg.items():
+        spend = a["billed"] + a["capeq"]
+        den = a["cache_read"] + a["input"]
+        eff.append({
+            "model": m, "output": int(a["output"]), "calls": int(a["calls"]),
+            "spend_usd": round(spend, 4),
+            "usd_per_moutput": round(spend / (a["output"] / 1e6), 4) if a["output"] else None,
+            "cache_hit_pct": round(100 * a["cache_read"] / den, 1) if den else None,
+            "ranked": a["output"] >= _EFF_MIN_OUTPUT,
+            "basis": "cap-equivalent" if a["sub"] else "invoiced",
+        })
+    ranked = [e for e in eff if e["ranked"] and e["usd_per_moutput"] is not None]
+    ranked.sort(key=lambda e: e["usd_per_moutput"])
+    eff.sort(key=lambda e: (not e["ranked"],
+                            e["usd_per_moutput"] if e["usd_per_moutput"] is not None else 1e9))
+
+    bal = _direct_provider_balances(root)
+    caps = _cap_pressure(root)
+
+    # ── warnings — things that need Richie, in one place, none of them a restated total ──────
+    warn = []
+    try:
+        doc = _core().load_doc(root, fresh=True)
+        errs, _ = _core().validate(doc)
+        for e in errs:
+            warn.append({"level": "bad", "what": "models.yaml rule breach", "detail": e})
+        for p in _core().PROFILES:
+            try:
+                probs = _core().verify_profile(doc, p, _core()._load_plain(_core().cfg_path(p, root)))
+                if probs:
+                    warn.append({"level": "warn", "what": f"{p} config drifted from models.yaml",
+                                 "detail": "; ".join(probs[:3])})
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    ma = bal.get("modelark") or {}
+    if ma.get("exhausted"):
+        warn.append({"level": "warn", "what": "ModelArk 5-hour quota exhausted",
+                     "detail": f"resets {ma.get('reset_at') or 'unknown'} — traffic is falling through to DeepSeek"})
+    orb = bal.get("openrouter") or {}
+    if orb.get("runway_h") is not None and orb["runway_h"] < 48:
+        warn.append({"level": "bad" if orb["runway_h"] < 12 else "warn",
+                     "what": "OpenRouter credit is running out",
+                     "detail": f"{orb['runway_h']:.0f}h left on the {orb.get('binding')}"})
+    for c in caps["cards"]:
+        if c["over"]:
+            warn.append({"level": "bad", "what": f"{c['id']} is over its cap",
+                         "detail": f"{c['assignee']} has spent ${c['spend_usd']:.2f} against ${c['cap_usd']:.2f}"})
+        elif c["eta_h"] is not None and c["eta_h"] < 1:
+            warn.append({"level": "warn", "what": f"{c['id']} will hit its cap within the hour",
+                         "detail": f"{c['assignee']} ${c['spend_usd']:.2f} of ${c['cap_usd']:.2f}, "
+                                   f"burning ${c['burn_usd_per_h']:.2f}/h"})
+
+    return {"window": window, "generated_at": now,
+            "cards": card_stats, "most_used_model": most_used,
+            "efficiency": eff[:12], "best": ranked[0] if ranked else None,
+            "most_used_share_pct": most_used_share,
+            "worst": ranked[-1] if ranked else None,
+            "eff_min_output": _EFF_MIN_OUTPUT,
+            "cap_pressure": caps, "balances": bal,
+            "fleet": {"calls": T.get("calls"), "tokens": T.get("tokens"),
+                      "cache_hit_pct": T.get("cache_hit_pct")},
+            "warnings": warn}
+
+
 def _runtime_status() -> dict:
     try:
         from agent import auxiliary_client as ac
@@ -658,6 +930,12 @@ def get_usage(window: Optional[int] = None, bucket: Optional[int] = None, tz: Op
     u["daily"] = [{"day": int(x["t"] // 86400), "billed_usd": x["billed_usd"], "calls": int(round(x["calls"])),
                    "modelark_calls": int(round(x["modelark_calls"]))} for x in u["series"]]
     return u
+
+
+@router.get("/home")
+def get_home(window: Optional[int] = None, tz: Optional[str] = None):
+    """The Home tab. Deliberately carries nothing that Costs, Models or Agents already shows."""
+    return home(int(window or 7 * 86400), tz=tz)
 
 
 @router.get("/market")

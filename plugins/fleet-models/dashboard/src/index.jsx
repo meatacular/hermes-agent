@@ -81,7 +81,7 @@ const hostSlug = (t) => String(t || "").split("/")[0];
 // row across its active span, so sub-hour figures are close estimates.
 const PERIODS = [["15m", 900, "15 minutes"], ["30m", 1800, "30 minutes"], ["1h", 3600, "hour"], ["2h", 7200, "2 hours"],
   ["3h", 10800, "3 hours"], ["6h", 21600, "6 hours"], ["12h", 43200, "12 hours"], ["24h", 86400, "24 hours"],
-  ["7d", 604800, "7 days"], ["30d", 2592000, "30 days"]];
+  ["7d", 604800, "7 days"], ["14d", 1209600, "14 days"], ["30d", 2592000, "30 days"]];
 const NICE = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800];
 const LABEL_STEPS = NICE.concat([1209600]);
 const MIN_PITCH = 12;      // px per bar, at least
@@ -352,6 +352,43 @@ function BalanceStats({ balances, T }) {
   return <div className="fm-stats fm-stats--bal">{cards}</div>;
 }
 
+// ── decision log ─────────────────────────────────────────────────────────────────────────
+// 2026-09-15 (Richie): "does these text summaries update in line with changes automatically? if
+// not, change it to more of a decision log and place it under the other components."
+//
+// They did not, and could not. A model's `notes` was hand-written prose restating prices, cache
+// rates and rung order — every one of which is read live somewhere else on this page, and every
+// one of which the prose goes stale against the moment it changes. Worse, it read as current fact
+// while being a snapshot of whenever someone last typed it.
+//
+// So the prose is gone and this is what replaced it: dated entries, each with who decided and
+// why, rendered BELOW the live components rather than above them. A log is allowed to be old —
+// that is what a log is. Anything that should be current (price, context, cache hit, which hosts
+// serve it) is read from the API a few lines up the page and is not repeated here.
+function DecisionLog({ entries, title, empty }) {
+  const rows = (entries || []).slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  return (
+    <Section title={title || "Decision log"}
+      right={<span className="fm-muted fm-small">dated record — not live state</span>}>
+      {!rows.length ? <p className="fm-muted fm-small">{empty || "No decisions recorded for this model yet."}</p> : null}
+      <ol className="fm-dlog">
+        {rows.map((d, i) => (
+          <li key={i} className="fm-dlog-item">
+            <div className="fm-dlog-meta">
+              <span className="fm-dlog-date">{d.date || "undated"}</span>
+              {d.by ? <span className={cls("fm-dlog-by", "fm-dlog-by--" + String(d.by).replace(/[^a-z]/g, ""))}>{d.by}</span> : null}
+            </div>
+            <div className="fm-dlog-body">
+              <div className="fm-dlog-what">{d.what}</div>
+              {d.why ? <div className="fm-dlog-why">{d.why}</div> : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </Section>
+  );
+}
+
 function Badge({ tone, children, title }) {
   return <span className={cls("fm-badge", tone && "fm-badge--" + tone)} title={title}>{children}</span>;
 }
@@ -459,93 +496,11 @@ function helperGroups(aux) {
   return Object.values(groups);
 }
 
-function AgentCard({ doc, p, drift, use, spark, win, onOpen }) {
-  const a = doc.agents[p];
-  const aux = a.aux || {};
-  const top = use ? use.hosts.slice().sort((x, y) => y[1] - x[1])[0] : null;
-  return (
-    <article className={cls("fm-card", drift && "fm-card--drift")} onClick={onOpen} role="button" tabIndex={0}
-      onKeyDown={(e) => e.key === "Enter" && onOpen()}>
-      <header className="fm-card-head">
-        <div>
-          <div className="fm-card-name">{a.name || p} {a.locked ? <span className="fm-lock" title="Locked — changes need an explicit unlock">🔒</span> : null}</div>
-          <div className="fm-card-role">{a.role || p}</div>
-        </div>
-        <div className="fm-card-badges">
-          {drift ? <Badge tone="warn" title={drift.join("\n")}>drift</Badge> : <Badge tone="ok">in sync</Badge>}
-          {a.reasoning ? <Badge title="agent default reasoning">{a.reasoning}</Badge> : null}
-        </div>
-      </header>
-      <dl className="fm-slots">
-        <dt>Main</dt><dd><Chain doc={doc} chain={chainOf(a.main)} /></dd>
-        <dt>Subagents</dt><dd><Chain doc={doc} chain={chainOf(a.subagents)} empty="inherit main" /></dd>
-        {a.cron ? <Fragment><dt>Cron</dt><dd><Chain doc={doc} chain={chainOf(a.cron)} /></dd></Fragment> : null}
-        <dt>Vision</dt><dd><Chain doc={doc} chain={chainOf(aux.vision)} empty="main model" /></dd>
-        {helperGroups(aux).map((g) => (
-          <Fragment key={g.tasks.join()}>
-            <dt title={g.tasks.join(", ")}>{g.tasks.length > 1 ? "Helpers ×" + g.tasks.length : TASK_LABEL[g.tasks[0]] || g.tasks[0]}</dt>
-            <dd><Chain doc={doc} chain={g.chain} />{g.reasoning ? <span className="fm-tag fm-tag--r">{g.reasoning}</span> : null}</dd>
-          </Fragment>
-        ))}
-      </dl>
-      <footer className="fm-card-foot">
-        {spark ? <Spark values={spark} label={`${a.name || p}: calls over the last ${periodName(win)}`} /> : null}
-        <span className="fm-card-win">{periodShort(win)}</span>
-        {use ? (
-          <Fragment>
-            <span><b>{num(use.calls)}</b> calls</span>
-            <span><b>{money(use.billed, 3)}</b> billed</span>
-            <span><b>{num(use.ma)}</b> on subscription</span>
-            {top ? <span className="fm-muted" title="most calls served by">via {top[0]}</span> : null}
-          </Fragment>
-        ) : <span className="fm-muted">usage loading…</span>}
-      </footer>
-    </article>
-  );
-}
-
-function usageByProfile(usage) {
-  const out = {};
-  ((usage && usage.rows) || []).forEach((r) => {
-    const u = (out[r.profile] = out[r.profile] || { calls: 0, billed: 0, ma: 0, hostMap: {} });
-    u.calls += r.calls; u.billed += r.billed_usd; if (r.modelark) u.ma += r.calls;
-    if (r.host) u.hostMap[r.host] = (u.hostMap[r.host] || 0) + r.calls;
-  });
-  Object.values(out).forEach((u) => { u.hosts = Object.entries(u.hostMap); });
-  return out;
-}
-
-function FleetView({ state, doc, usage, win, onOpen }) {
-  const byP = usageByProfile(usage);
-  const empty = { calls: 0, billed: 0, ma: 0, hosts: [] };
-  const tot = Object.values(byP).reduce((a, u) => ({ calls: a.calls + u.calls, billed: a.billed + u.billed, ma: a.ma + u.ma }), { calls: 0, billed: 0, ma: 0 });
-  const models = doc.models || {};
-  const T = (usage && usage.totals) || {};
-  const k = (v, f) => (usage ? f(v) : "—");
-  return (
-    <Fragment>
-      <div className="fm-stats">
-        <Stat label={`Calls · ${periodShort(win)}`} value={k(tot.calls, num)} sub={lastLabel(win).toLowerCase()} />
-        <Stat label={`Tokens · ${periodShort(win)}`} value={k(T.tokens, tok)}
-          sub={T.tokens ? `${tok(T.input)} in · ${tok(T.output)} out · ${tok(T.cache_read)} cached` : "—"} />
-        <Stat label="Cache hit" value={T.cache_hit_pct == null ? "—" : T.cache_hit_pct + "%"}
-          sub="of prompt tokens served from cache" tone="ok" />
-        <Stat label={`Cost · ${periodShort(win)}`} value={k(tot.billed, (v) => money(v, 2))}
-          sub={costSub(T)} tone="money" />
-        <Stat label="ModelArk subscription" value={k(tot.ma, (v) => num(v) + " calls")} sub={tot.calls ? Math.round((100 * tot.ma) / tot.calls) + "% of all calls · $0" : "$0"} tone="sub" />
-        <Stat label="Registry" value={Object.keys(models).length + " models"} sub={Object.values(models).filter((m) => m.provider === "modelark").length + " subscription · " + Object.values(models).filter((m) => m.provider === "openrouter").length + " OpenRouter"} />
-        <Stat label="Sync" value={Object.keys(state.drift || {}).length ? Object.keys(state.drift).length + " drifted" : "all 9 in sync"} tone={Object.keys(state.drift || {}).length ? "warn" : "ok"} sub={"revision " + state.revision} />
-      </div>
-      <BalanceStats balances={state.balances} T={T} />
-      <div className="fm-grid">
-        {state.profiles.map((p) => (
-          <AgentCard key={p} doc={doc} p={p} drift={(state.drift || {})[p]} use={usage ? byP[p] || empty : null} win={win}
-            spark={usage && usage.by_profile ? ((usage.by_profile[p] || {}).calls || (usage.series || []).map(() => 0)) : null} onOpen={() => onOpen(p)} />
-        ))}
-      </div>
-    </Fragment>
-  );
-}
+// AgentCard, usageByProfile and FleetView lived here until 2026-09-15. Richie: "the 'fleet'
+// homepage seems to duplicate information on other tabs." It did — five totals that Costs already
+// showed and a grid of agent cards that Agents already showed — so the tab was replaced by Home
+// (see HomeView) and the components were deleted rather than left as dead weight. Per-agent spend
+// lives on Costs under "Spend by agent"; per-agent configuration lives on Agents.
 
 // ── Agent editor ─────────────────────────────────────────────────────────────────────────
 function LiveChain({ doc, live }) {
@@ -804,7 +759,6 @@ function ModelDetail({ draft, alias, setDraft, usage, win }) {
           <Badge>{m.vendor}</Badge>
         </div>
       </header>
-      {m.notes ? <p className="fm-notes">{m.notes}</p> : null}
       <div className="fm-two">
         <Section title="Settings">
           <label className="fm-field"><span>Display name</span><input value={m.short || ""} onChange={(e) => set((x) => { x.short = e.target.value; })} /></label>
@@ -818,7 +772,8 @@ function ModelDetail({ draft, alias, setDraft, usage, win }) {
             <label className="fm-check"><input type="checkbox" checked={!!m.vision} onChange={(e) => set((x) => { x.vision = e.target.checked; })} /> accepts images</label>
             <label className="fm-check"><input type="checkbox" checked={m.tools !== false} onChange={(e) => set((x) => { x.tools = e.target.checked; })} /> tool calling</label>
           </div>
-          <label className="fm-field"><span>Notes</span><textarea rows={3} value={m.notes || ""} onChange={(e) => set((x) => { x.notes = e.target.value; })} /></label>
+          <label className="fm-field"><span>Notes</span><textarea rows={2} value={m.notes || ""} onChange={(e) => set((x) => { x.notes = e.target.value; })} />
+            <small>One line of standing fact. Anything dated — a measurement, a routing call, a trap — belongs in the decision log at the foot of this page, where it carries its date and who decided it.</small></label>
         </Section>
         <Section title={m.provider === "modelark" ? "Pricing — cap-equivalent" : "Usage · " + periodShort(win)}
           right={spark && totalCalls ? <span className="fm-muted fm-small">{num(totalCalls)} calls · {lastLabel(win).toLowerCase()}</span> : null}>
@@ -860,6 +815,9 @@ function ModelDetail({ draft, alias, setDraft, usage, win }) {
           {!uses.length ? <span className="fm-muted">Not in any waterfall. <button className="fm-link fm-link--danger" onClick={() => setDraft((d) => { const n = clone(d); delete n.models[alias]; return n; })}>Remove from registry</button></span> : null}
         </div>
       </Section>
+      <DecisionLog entries={m.decisions}
+        title={`Decision log — ${m.short || alias}`}
+        empty="Nothing recorded for this model yet. Entries are added in fleet/models.yaml under the model's `decisions:` list and travel with it through preview, apply and revert like any other change." />
     </div>
   );
 }
@@ -921,6 +879,166 @@ function ModelsView({ draft, setDraft, usage, win, sel, setSel }) {
       </aside>
       <div className="fm-model-main">{cur ? <ModelDetail key={cur} draft={draft} alias={cur} setDraft={setDraft} usage={usage} win={win} /> : null}</div>
     </div>
+  );
+}
+
+// ── Home ─────────────────────────────────────────────────────────────────────────────────
+// 2026-09-15 (Richie): "the 'fleet' homepage seems to duplicate information on other tabs.
+// remove it and replace with a home tab that provides relevant information highlights, updates,
+// and warnings that are not duplicated elsewhere."
+//
+// The old Fleet tab was five totals that Costs already showed, plus a grid of agent cards that
+// Agents already showed. So the rule for this page is: if you can read it on Costs, Models or
+// Agents, it does not go here. What is left is the three things none of those answer —
+//   * per-CARD economics, because the card is the unit Richie manages and every other tab
+//     aggregates by model or by agent;
+//   * efficiency, which is a RATE and therefore says something a total cannot;
+//   * the two clocks — how long until a worker hits its cap, and how long until the money runs
+//     out — which are the only numbers on the dashboard that are about the future.
+//
+// It keeps the period bar: an average, a rate and a burn are meaningless without a window. The
+// balances and the cap clock are absolute and say so.
+function hrs(v) {
+  if (v == null) return "—";
+  if (v < 1) return Math.round(v * 60) + " min";
+  if (v < 48) return v.toFixed(v < 10 ? 1 : 0) + "h";
+  return Math.round(v / 24) + "d";
+}
+
+function HomeView({ state, win }) {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let live = true;
+    setErr(null);
+    fetchJSON(`${API}/home?window=${win}&tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC")}`)
+      .then((r) => { if (live) setD(r); })
+      .catch((e) => { if (live) setErr(String(e)); });
+    return () => { live = false; };
+  }, [win]);
+
+  if (err) return <div className="fm-note fm-note--warn">Home could not load: {err}</div>;
+  if (!d) return <div className="fm-muted">Loading…</div>;
+
+  const C = d.cards || {};
+  const cap = d.cap_pressure || {};
+  const bal = d.balances || {};
+  const or = bal.openrouter || {}, ds = bal.deepseek || {}, ma = bal.modelark || {};
+  const next = (cap.cards || []).find((c) => c.eta_h != null) || (cap.cards || [])[0];
+  // Whichever pot empties first is the one worth showing, exactly as budget-watch decides it.
+  const pots = [["OpenRouter", or.runway_h, or.balance_usd], ["DeepSeek", null, ds.balance_usd]]
+    .filter((x) => x[1] != null);
+  const soonest = pots.length ? pots.reduce((a, b) => (b[1] < a[1] ? b : a)) : null;
+
+  return (
+    <Fragment>
+      {(d.warnings || []).length ? (
+        <Section title={`Needs you — ${d.warnings.length}`} className="fm-warnblock">
+          {d.warnings.map((w, i) => (
+            <div key={i} className={cls("fm-note", w.level === "bad" ? "fm-note--warn" : "fm-note--warn")}>
+              <b>{w.what}</b> — {w.detail}
+            </div>
+          ))}
+        </Section>
+      ) : (
+        <div className="fm-note fm-note--ok">Nothing needs you. No rule breach, no drifted config, no card over its cap, no provider running dry.</div>
+      )}
+
+      <div className="fm-stats">
+        <Stat label="Money runs out in" tone={or.runway_h != null && or.runway_h < 48 ? "warn" : "or"}
+          value={hrs(or.runway_h)}
+          title={or.binding ? `binding: the ${or.binding} · burn ${money(or.burn_usd_per_h, 3)}/h over ${or.window_hours}h` : ""}
+          sub={soonest ? `${money(soonest[2], 2)} on ${soonest[0]} · ${or.binding || "credit"}` : "no balance readable"} />
+        <Stat label="Nearest cap" tone={next && next.over ? "warn" : "sub"}
+          value={next ? (next.over ? "over" : hrs(next.eta_h)) : "no card running"}
+          title={next ? `${next.id} · ${next.assignee} · ${money(next.spend_usd, 2)} of ${money(next.cap_usd, 2)}` : ""}
+          sub={next ? `${next.assignee} on ${next.id} · ${money(next.spend_usd, 2)} of ${money(next.cap_usd, 2)}`
+                    : `cap ${money(cap.base_usd, 2)} per worker, ${money(cap.ceiling_usd, 2)} extended`} />
+        <Stat label={`Cost per card · ${periodShort(win)}`} tone="money"
+          value={C.avg_usd == null ? "—" : money(C.avg_usd, 3)}
+          title="mean across every card with a session in the window; subscription work counted at its cap-equivalent, not at the $0 it is invoiced"
+          sub={C.cards ? `${num(C.cards)} cards · median ${money(C.median_usd, 3)}` : "no cards in this window"} />
+        <Stat label={`Tokens per card · ${periodShort(win)}`}
+          value={tok(C.avg_tokens)}
+          title="input + output + cache reads. Cache reads dominate by design — that is the saving working, not waste."
+          sub={C.usd_per_mtok == null ? "—" : money(C.usd_per_mtok, 4) + " per million tokens"} />
+        <Stat label={`Most used · ${periodShort(win)}`}
+          value={d.most_used_model ? (d.most_used_model.split("/").pop()) : "—"}
+          title={d.most_used_model || ""}
+          sub={d.most_used_share_pct != null ? d.most_used_share_pct + "% of all calls" : ""} />
+        <Stat label="Most efficient" tone="ok"
+          value={d.best ? money(d.best.usd_per_moutput, 2) : "—"}
+          title={d.best ? `${d.best.model} — ${money(d.best.spend_usd, 3)} for ${tok(d.best.output)} output tokens` : ""}
+          sub={d.best ? `${d.best.model.split("/").pop()} · per M output` : "not enough output to rank"} />
+      </div>
+
+      <div className="fm-two">
+        <Section title="Running now — cap pressure"
+          right={<span className="fm-muted fm-small">{money(cap.base_usd, 2)} per worker · {money(cap.ceiling_usd, 2)} with the one extension</span>}>
+          {!(cap.cards || []).length ? <p className="fm-muted fm-small">No card is running.</p> : null}
+          {(cap.cards || []).map((c) => (
+            <div key={c.id} className="fm-bar-row" title={c.title}>
+              <span className="fm-bar-label">{c.assignee} · {c.id}</span>
+              <span className="fm-bar"><span className={cls(c.over && "is-over")} style={{ width: Math.min(100, c.pct || 0) + "%" }} /></span>
+              <span className="fm-bar-val">
+                {money(c.spend_usd, 2)} / {money(c.cap_usd, 2)}
+                {c.burn_usd_per_h == null ? <span className="fm-muted"> · no spend recorded yet</span>
+                  : <span className="fm-muted"> · {money(c.burn_usd_per_h, 2)}/h · {hrs(c.eta_h)}</span>}
+              </span>
+            </div>
+          ))}
+          <p className="fm-muted fm-small">Measured against each card's own assignee ledger, which is what the cap gate itself reads — so this agrees with the gate rather than approximating it. A card showing no spend has no session row yet, which is not the same as costing nothing.</p>
+        </Section>
+
+        <Section title={`This window's cards · ${periodShort(win)}`}>
+          <div className="fm-kv">
+            <div><span>Cards worked</span><b>{num(C.cards)}</b></div>
+            <div><span>Cards with more than one worker</span><b>{num(C.multi_worker_cards)}</b></div>
+            <div><span>Invoiced</span><b>{money(C.billed_usd, 2)}</b></div>
+            <div><span>Subscription, at cap-equivalent</span><b>{money(C.capeq_usd, 2)}</b></div>
+            <div><span>Mean per card</span><b>{money(C.avg_usd, 3)}</b></div>
+            <div><span>Median per card</span><b>{money(C.median_usd, 3)}</b></div>
+          </div>
+          {C.dearest ? (
+            <p className="fm-muted fm-small">Dearest card this window: <b>{C.dearest.id}</b> at {money(C.dearest.usd, 2)} across {C.dearest.workers.join(", ")}.
+              {C.dearest.workers.length > 1 ? " Multiple workers, so the per-worker cap applies to each of them separately — a pooled figure above $1 is not a breach." : ""}</p>
+          ) : null}
+          {ma.exhausted ? <p className="fm-muted fm-small">ModelArk's 5-hour quota is exhausted{ma.reset_at ? `, resets ${ma.reset_at}` : ""} — flash traffic is falling through to DeepSeek direct.</p> : null}
+        </Section>
+      </div>
+
+      <Section title={`Efficiency · ${periodShort(win)}`}
+        right={<span className="fm-muted fm-small">dollars per million OUTPUT tokens — lower is better</span>}>
+        <p className="fm-muted fm-small">
+          <b>The calculation:</b> (invoiced + cap-equivalent) ÷ output tokens × 1,000,000. Output is the
+          work; input and cache reads are what it cost to get there, so a model that reads a big cached
+          prefix cheaply scores well for it — which is the behaviour worth rewarding. Two choices that
+          change the ranking, stated so they can be argued with: a <b>subscription rung is scored on its
+          cap-equivalent, not the $0 it is invoiced</b> (at $0 it would be infinitely efficient and this
+          column would mean nothing), and a model needs <b>{tok(d.eff_min_output)} output tokens</b> in the
+          window to be ranked at all, or three lucky calls beat a workhorse.
+        </p>
+        <table className="fm-table">
+          <thead><tr><th>Model</th><th className="fm-num">$ / M output</th><th className="fm-num">Output</th><th className="fm-num">Calls</th><th className="fm-num">Cache hit</th><th className="fm-num">Spend</th><th>Basis</th></tr></thead>
+          <tbody>
+            {(d.efficiency || []).map((e) => (
+              <tr key={e.model} className={cls(!e.ranked && "is-dim")}>
+                <td>{e.model}</td>
+                <td className="fm-num">{e.usd_per_moutput == null ? "—" : money(e.usd_per_moutput, 2)}</td>
+                <td className="fm-num">{tok(e.output)}</td>
+                <td className="fm-num">{num(e.calls)}</td>
+                <td className="fm-num">{e.cache_hit_pct == null ? "—" : e.cache_hit_pct + "%"}</td>
+                <td className="fm-num">{money(e.spend_usd, 3)}</td>
+                <td><span className={cls("fm-tag", e.basis === "cap-equivalent" && "fm-tag--sub")}>{e.basis}</span>{!e.ranked ? <span className="fm-muted fm-small"> · too little output to rank</span> : null}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Section>
+
+      <DecisionLog entries={(state.doc && state.doc.decisions) || []}
+        title="Fleet decisions" empty="No fleet-level decisions recorded." />
+    </Fragment>
   );
 }
 
@@ -1112,7 +1230,7 @@ function ModelsPage() {
   const [uErr, setUErr] = useState(0);        // consecutive failed usage loads
   const retryT = useRef(null);
   const useq = useRef(0);
-  const [tab, setTab] = useState("fleet");
+  const [tab, setTab] = useState("home");
   const [agent, setAgent] = useState("root");
   const [modelSel, setModelSel] = useState(null);
   const [plan, setPlan] = useState(null);
@@ -1198,7 +1316,7 @@ function ModelsPage() {
   const stale = !!(usage && usage.window !== win);
   const shown = usage;
   const doc = draft;
-  const TABS = [["fleet", "Fleet"], ["agent", "Agents"], ["models", "Models & hosts"], ["costs", "Costs"], ["decisions", "Rules & history"]];
+  const TABS = [["home", "Home"], ["agent", "Agents"], ["models", "Models & hosts"], ["costs", "Costs"], ["decisions", "Rules & history"]];
   return (
     <div className="fm-root" ref={setRootEl}>
       <header className="fm-head">
@@ -1217,9 +1335,9 @@ function ModelsPage() {
         {TABS.map(([k, l]) => <button key={k} className={cls("fm-tab", tab === k && "is-active")} onClick={() => setTab(k)}>{l}</button>)}
       </nav>
       {movedUnder ? <div className="fm-note fm-note--warn">Someone applied a change while you were editing (now revision {state.revision}). Preview will refuse a stale edit — discard and redo it.</div> : null}
-      {tab === "fleet" || tab === "models" || tab === "costs" ? <PeriodBar win={win} setWin={setWin} usage={shown} loading={uLoading} failed={uErr > 0} /> : null}
+      {tab === "home" || tab === "models" || tab === "costs" ? <PeriodBar win={win} setWin={setWin} usage={shown} loading={uLoading} failed={uErr > 0} /> : null}
       <main className={cls("fm-main", stale && "is-stale")}>
-        {tab === "fleet" ? <FleetView state={state} doc={doc} usage={shown} win={shown ? shown.window : win} onOpen={(p) => { setAgent(p); setTab("agent"); }} /> : null}
+        {tab === "home" ? <HomeView state={{ ...state, doc }} win={shown ? shown.window : win} /> : null}
         {tab === "agent" ? <AgentView state={state} draft={draft} setDraft={setDraft} p={agent} setP={setAgent} /> : null}
         {tab === "models" ? <ModelsView draft={draft} setDraft={setDraft} usage={shown} win={shown ? shown.window : win} sel={modelSel} setSel={setModelSel} /> : null}
         {tab === "costs" ? <CostsView doc={doc} usage={shown} win={shown ? shown.window : win} width={chartW} balances={state.balances} /> : null}

@@ -215,6 +215,17 @@
       }
       if (!cards.length) return null;
       return /* @__PURE__ */ h("div", { className: "fm-stats fm-stats--bal" }, cards);
+    }, DecisionLog2 = function({ entries, title, empty }) {
+      const rows = (entries || []).slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+      return /* @__PURE__ */ h(
+        Section2,
+        {
+          title: title || "Decision log",
+          right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, "dated record \u2014 not live state")
+        },
+        !rows.length ? /* @__PURE__ */ h("p", { className: "fm-muted fm-small" }, empty || "No decisions recorded for this model yet.") : null,
+        /* @__PURE__ */ h("ol", { className: "fm-dlog" }, rows.map((d, i) => /* @__PURE__ */ h("li", { key: i, className: "fm-dlog-item" }, /* @__PURE__ */ h("div", { className: "fm-dlog-meta" }, /* @__PURE__ */ h("span", { className: "fm-dlog-date" }, d.date || "undated"), d.by ? /* @__PURE__ */ h("span", { className: cls2("fm-dlog-by", "fm-dlog-by--" + String(d.by).replace(/[^a-z]/g, "")) }, d.by) : null), /* @__PURE__ */ h("div", { className: "fm-dlog-body" }, /* @__PURE__ */ h("div", { className: "fm-dlog-what" }, d.what), d.why ? /* @__PURE__ */ h("div", { className: "fm-dlog-why" }, d.why) : null))))
+      );
     }, Badge2 = function({ tone, children, title }) {
       return /* @__PURE__ */ h("span", { className: cls2("fm-badge", tone && "fm-badge--" + tone), title }, children);
     }, Section2 = function({ title, right, children, className }) {
@@ -291,79 +302,6 @@
         (groups[k] = groups[k] || { chain: chainOf(s), reasoning: reasoningOf(s), tasks: [] }).tasks.push(t);
       });
       return Object.values(groups);
-    }, AgentCard2 = function({ doc, p, drift, use, spark, win, onOpen }) {
-      const a = doc.agents[p];
-      const aux = a.aux || {};
-      const top = use ? use.hosts.slice().sort((x, y) => y[1] - x[1])[0] : null;
-      return /* @__PURE__ */ h(
-        "article",
-        {
-          className: cls2("fm-card", drift && "fm-card--drift"),
-          onClick: onOpen,
-          role: "button",
-          tabIndex: 0,
-          onKeyDown: (e) => e.key === "Enter" && onOpen()
-        },
-        /* @__PURE__ */ h("header", { className: "fm-card-head" }, /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("div", { className: "fm-card-name" }, a.name || p, " ", a.locked ? /* @__PURE__ */ h("span", { className: "fm-lock", title: "Locked \u2014 changes need an explicit unlock" }, "\u{1F512}") : null), /* @__PURE__ */ h("div", { className: "fm-card-role" }, a.role || p)), /* @__PURE__ */ h("div", { className: "fm-card-badges" }, drift ? /* @__PURE__ */ h(Badge2, { tone: "warn", title: drift.join("\n") }, "drift") : /* @__PURE__ */ h(Badge2, { tone: "ok" }, "in sync"), a.reasoning ? /* @__PURE__ */ h(Badge2, { title: "agent default reasoning" }, a.reasoning) : null)),
-        /* @__PURE__ */ h("dl", { className: "fm-slots" }, /* @__PURE__ */ h("dt", null, "Main"), /* @__PURE__ */ h("dd", null, /* @__PURE__ */ h(Chain2, { doc, chain: chainOf(a.main) })), /* @__PURE__ */ h("dt", null, "Subagents"), /* @__PURE__ */ h("dd", null, /* @__PURE__ */ h(Chain2, { doc, chain: chainOf(a.subagents), empty: "inherit main" })), a.cron ? /* @__PURE__ */ h(Fragment, null, /* @__PURE__ */ h("dt", null, "Cron"), /* @__PURE__ */ h("dd", null, /* @__PURE__ */ h(Chain2, { doc, chain: chainOf(a.cron) }))) : null, /* @__PURE__ */ h("dt", null, "Vision"), /* @__PURE__ */ h("dd", null, /* @__PURE__ */ h(Chain2, { doc, chain: chainOf(aux.vision), empty: "main model" })), helperGroups2(aux).map((g) => /* @__PURE__ */ h(Fragment, { key: g.tasks.join() }, /* @__PURE__ */ h("dt", { title: g.tasks.join(", ") }, g.tasks.length > 1 ? "Helpers \xD7" + g.tasks.length : TASK_LABEL[g.tasks[0]] || g.tasks[0]), /* @__PURE__ */ h("dd", null, /* @__PURE__ */ h(Chain2, { doc, chain: g.chain }), g.reasoning ? /* @__PURE__ */ h("span", { className: "fm-tag fm-tag--r" }, g.reasoning) : null)))),
-        /* @__PURE__ */ h("footer", { className: "fm-card-foot" }, spark ? /* @__PURE__ */ h(Spark2, { values: spark, label: `${a.name || p}: calls over the last ${periodName(win)}` }) : null, /* @__PURE__ */ h("span", { className: "fm-card-win" }, periodShort(win)), use ? /* @__PURE__ */ h(Fragment, null, /* @__PURE__ */ h("span", null, /* @__PURE__ */ h("b", null, num(use.calls)), " calls"), /* @__PURE__ */ h("span", null, /* @__PURE__ */ h("b", null, money(use.billed, 3)), " billed"), /* @__PURE__ */ h("span", null, /* @__PURE__ */ h("b", null, num(use.ma)), " on subscription"), top ? /* @__PURE__ */ h("span", { className: "fm-muted", title: "most calls served by" }, "via ", top[0]) : null) : /* @__PURE__ */ h("span", { className: "fm-muted" }, "usage loading\u2026"))
-      );
-    }, usageByProfile2 = function(usage) {
-      const out = {};
-      (usage && usage.rows || []).forEach((r) => {
-        const u = out[r.profile] = out[r.profile] || { calls: 0, billed: 0, ma: 0, hostMap: {} };
-        u.calls += r.calls;
-        u.billed += r.billed_usd;
-        if (r.modelark) u.ma += r.calls;
-        if (r.host) u.hostMap[r.host] = (u.hostMap[r.host] || 0) + r.calls;
-      });
-      Object.values(out).forEach((u) => {
-        u.hosts = Object.entries(u.hostMap);
-      });
-      return out;
-    }, FleetView2 = function({ state, doc, usage, win, onOpen }) {
-      const byP = usageByProfile2(usage);
-      const empty = { calls: 0, billed: 0, ma: 0, hosts: [] };
-      const tot = Object.values(byP).reduce((a, u) => ({ calls: a.calls + u.calls, billed: a.billed + u.billed, ma: a.ma + u.ma }), { calls: 0, billed: 0, ma: 0 });
-      const models = doc.models || {};
-      const T = usage && usage.totals || {};
-      const k = (v, f) => usage ? f(v) : "\u2014";
-      return /* @__PURE__ */ h(Fragment, null, /* @__PURE__ */ h("div", { className: "fm-stats" }, /* @__PURE__ */ h(Stat2, { label: `Calls \xB7 ${periodShort(win)}`, value: k(tot.calls, num), sub: lastLabel(win).toLowerCase() }), /* @__PURE__ */ h(
-        Stat2,
-        {
-          label: `Tokens \xB7 ${periodShort(win)}`,
-          value: k(T.tokens, tok),
-          sub: T.tokens ? `${tok(T.input)} in \xB7 ${tok(T.output)} out \xB7 ${tok(T.cache_read)} cached` : "\u2014"
-        }
-      ), /* @__PURE__ */ h(
-        Stat2,
-        {
-          label: "Cache hit",
-          value: T.cache_hit_pct == null ? "\u2014" : T.cache_hit_pct + "%",
-          sub: "of prompt tokens served from cache",
-          tone: "ok"
-        }
-      ), /* @__PURE__ */ h(
-        Stat2,
-        {
-          label: `Cost \xB7 ${periodShort(win)}`,
-          value: k(tot.billed, (v) => money(v, 2)),
-          sub: costSub(T),
-          tone: "money"
-        }
-      ), /* @__PURE__ */ h(Stat2, { label: "ModelArk subscription", value: k(tot.ma, (v) => num(v) + " calls"), sub: tot.calls ? Math.round(100 * tot.ma / tot.calls) + "% of all calls \xB7 $0" : "$0", tone: "sub" }), /* @__PURE__ */ h(Stat2, { label: "Registry", value: Object.keys(models).length + " models", sub: Object.values(models).filter((m) => m.provider === "modelark").length + " subscription \xB7 " + Object.values(models).filter((m) => m.provider === "openrouter").length + " OpenRouter" }), /* @__PURE__ */ h(Stat2, { label: "Sync", value: Object.keys(state.drift || {}).length ? Object.keys(state.drift).length + " drifted" : "all 9 in sync", tone: Object.keys(state.drift || {}).length ? "warn" : "ok", sub: "revision " + state.revision })), /* @__PURE__ */ h(BalanceStats2, { balances: state.balances, T }), /* @__PURE__ */ h("div", { className: "fm-grid" }, state.profiles.map((p) => /* @__PURE__ */ h(
-        AgentCard2,
-        {
-          key: p,
-          doc,
-          p,
-          drift: (state.drift || {})[p],
-          use: usage ? byP[p] || empty : null,
-          win,
-          spark: usage && usage.by_profile ? (usage.by_profile[p] || {}).calls || (usage.series || []).map(() => 0) : null,
-          onOpen: () => onOpen(p)
-        }
-      ))));
     }, LiveChain2 = function({ doc, live }) {
       if (!live) return /* @__PURE__ */ h("span", { className: "fm-muted" }, "not set");
       const byId = {};
@@ -592,7 +530,7 @@
       const bm = usage && usage.by_model || {};
       const spark = usage && usage.series ? usage.series.map((_, i) => ids.reduce((a, id) => a + (((bm[id] || {}).calls || [])[i] || 0), 0)) : null;
       const ce = m.cap_equivalent || {};
-      return /* @__PURE__ */ h("div", { className: "fm-model" }, /* @__PURE__ */ h("header", { className: "fm-model-head" }, /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("h2", null, m.short || alias, " ", /* @__PURE__ */ h("span", { className: cls2("fm-prov", "fm-prov--" + m.provider) }, PROV_LABEL[m.provider] || m.provider + " \xB7 metered")), /* @__PURE__ */ h("code", { className: "fm-code" }, m.id)), /* @__PURE__ */ h("div", { className: "fm-row" }, m.vision ? /* @__PURE__ */ h(Badge2, null, "vision") : /* @__PURE__ */ h(Badge2, { tone: "dim" }, "text-only"), m.tools !== false ? /* @__PURE__ */ h(Badge2, null, "tools") : /* @__PURE__ */ h(Badge2, { tone: "warn" }, "no tools"), m.context ? /* @__PURE__ */ h(Badge2, null, num(m.context), " ctx") : null, /* @__PURE__ */ h(Badge2, null, m.vendor))), m.notes ? /* @__PURE__ */ h("p", { className: "fm-notes" }, m.notes) : null, /* @__PURE__ */ h("div", { className: "fm-two" }, /* @__PURE__ */ h(Section2, { title: "Settings" }, /* @__PURE__ */ h("label", { className: "fm-field" }, /* @__PURE__ */ h("span", null, "Display name"), /* @__PURE__ */ h("input", { value: m.short || "", onChange: (e) => set((x) => {
+      return /* @__PURE__ */ h("div", { className: "fm-model" }, /* @__PURE__ */ h("header", { className: "fm-model-head" }, /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("h2", null, m.short || alias, " ", /* @__PURE__ */ h("span", { className: cls2("fm-prov", "fm-prov--" + m.provider) }, PROV_LABEL[m.provider] || m.provider + " \xB7 metered")), /* @__PURE__ */ h("code", { className: "fm-code" }, m.id)), /* @__PURE__ */ h("div", { className: "fm-row" }, m.vision ? /* @__PURE__ */ h(Badge2, null, "vision") : /* @__PURE__ */ h(Badge2, { tone: "dim" }, "text-only"), m.tools !== false ? /* @__PURE__ */ h(Badge2, null, "tools") : /* @__PURE__ */ h(Badge2, { tone: "warn" }, "no tools"), m.context ? /* @__PURE__ */ h(Badge2, null, num(m.context), " ctx") : null, /* @__PURE__ */ h(Badge2, null, m.vendor))), /* @__PURE__ */ h("div", { className: "fm-two" }, /* @__PURE__ */ h(Section2, { title: "Settings" }, /* @__PURE__ */ h("label", { className: "fm-field" }, /* @__PURE__ */ h("span", null, "Display name"), /* @__PURE__ */ h("input", { value: m.short || "", onChange: (e) => set((x) => {
         x.short = e.target.value;
       }) })), /* @__PURE__ */ h("label", { className: "fm-field" }, /* @__PURE__ */ h("span", null, "Reasoning pin"), /* @__PURE__ */ h("select", { value: m.reasoning || "", onChange: (e) => set((x) => {
         if (e.target.value) x.reasoning = e.target.value;
@@ -601,9 +539,9 @@
         x.vision = e.target.checked;
       }) }), " accepts images"), /* @__PURE__ */ h("label", { className: "fm-check" }, /* @__PURE__ */ h("input", { type: "checkbox", checked: m.tools !== false, onChange: (e) => set((x) => {
         x.tools = e.target.checked;
-      }) }), " tool calling")), /* @__PURE__ */ h("label", { className: "fm-field" }, /* @__PURE__ */ h("span", null, "Notes"), /* @__PURE__ */ h("textarea", { rows: 3, value: m.notes || "", onChange: (e) => set((x) => {
+      }) }), " tool calling")), /* @__PURE__ */ h("label", { className: "fm-field" }, /* @__PURE__ */ h("span", null, "Notes"), /* @__PURE__ */ h("textarea", { rows: 2, value: m.notes || "", onChange: (e) => set((x) => {
         x.notes = e.target.value;
-      }) }))), /* @__PURE__ */ h(
+      }) }), /* @__PURE__ */ h("small", null, "One line of standing fact. Anything dated \u2014 a measurement, a routing call, a trap \u2014 belongs in the decision log at the foot of this page, where it carries its date and who decided it."))), /* @__PURE__ */ h(
         Section2,
         {
           title: m.provider === "modelark" ? "Pricing \u2014 cap-equivalent" : "Usage \xB7 " + periodShort(win),
@@ -642,7 +580,14 @@
         const n = clone(d);
         delete n.models[alias];
         return n;
-      }) }, "Remove from registry")) : null)));
+      }) }, "Remove from registry")) : null)), /* @__PURE__ */ h(
+        DecisionLog2,
+        {
+          entries: m.decisions,
+          title: `Decision log \u2014 ${m.short || alias}`,
+          empty: "Nothing recorded for this model yet. Entries are added in fleet/models.yaml under the model's `decisions:` list and travel with it through preview, apply and revert like any other change."
+        }
+      ));
     }, AddModel2 = function({ draft, setDraft, onAdded }) {
       const [id, setId] = useState("");
       const [info, setInfo] = useState(null);
@@ -692,6 +637,112 @@
         const m = draft.models[a];
         return /* @__PURE__ */ h("button", { key: a, role: "tab", "aria-selected": a === cur, className: cls2("fm-model-item", a === cur && "is-active"), onClick: () => setSel(a) }, /* @__PURE__ */ h("span", { className: cls2("fm-pill-dot", "fm-dot--" + m.provider) }), /* @__PURE__ */ h("span", { className: "fm-model-item-name" }, m.short || a), /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, usedBy2(draft, a).length, " slots"));
       })), /* @__PURE__ */ h("details", { className: "fm-model-list-foot" }, /* @__PURE__ */ h("summary", null, "+ Add a model"), /* @__PURE__ */ h(AddModel2, { draft, setDraft, onAdded: setSel }))), /* @__PURE__ */ h("div", { className: "fm-model-main" }, cur ? /* @__PURE__ */ h(ModelDetail2, { key: cur, draft, alias: cur, setDraft, usage, win }) : null));
+    }, hrs2 = function(v) {
+      if (v == null) return "\u2014";
+      if (v < 1) return Math.round(v * 60) + " min";
+      if (v < 48) return v.toFixed(v < 10 ? 1 : 0) + "h";
+      return Math.round(v / 24) + "d";
+    }, HomeView2 = function({ state, win }) {
+      const [d, setD] = useState(null);
+      const [err, setErr] = useState(null);
+      useEffect(() => {
+        let live = true;
+        setErr(null);
+        fetchJSON(`${API}/home?window=${win}&tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC")}`).then((r) => {
+          if (live) setD(r);
+        }).catch((e) => {
+          if (live) setErr(String(e));
+        });
+        return () => {
+          live = false;
+        };
+      }, [win]);
+      if (err) return /* @__PURE__ */ h("div", { className: "fm-note fm-note--warn" }, "Home could not load: ", err);
+      if (!d) return /* @__PURE__ */ h("div", { className: "fm-muted" }, "Loading\u2026");
+      const C = d.cards || {};
+      const cap = d.cap_pressure || {};
+      const bal = d.balances || {};
+      const or = bal.openrouter || {}, ds = bal.deepseek || {}, ma = bal.modelark || {};
+      const next = (cap.cards || []).find((c) => c.eta_h != null) || (cap.cards || [])[0];
+      const pots = [["OpenRouter", or.runway_h, or.balance_usd], ["DeepSeek", null, ds.balance_usd]].filter((x) => x[1] != null);
+      const soonest = pots.length ? pots.reduce((a, b) => b[1] < a[1] ? b : a) : null;
+      return /* @__PURE__ */ h(Fragment, null, (d.warnings || []).length ? /* @__PURE__ */ h(Section2, { title: `Needs you \u2014 ${d.warnings.length}`, className: "fm-warnblock" }, d.warnings.map((w, i) => /* @__PURE__ */ h("div", { key: i, className: cls2("fm-note", w.level === "bad" ? "fm-note--warn" : "fm-note--warn") }, /* @__PURE__ */ h("b", null, w.what), " \u2014 ", w.detail))) : /* @__PURE__ */ h("div", { className: "fm-note fm-note--ok" }, "Nothing needs you. No rule breach, no drifted config, no card over its cap, no provider running dry."), /* @__PURE__ */ h("div", { className: "fm-stats" }, /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: "Money runs out in",
+          tone: or.runway_h != null && or.runway_h < 48 ? "warn" : "or",
+          value: hrs2(or.runway_h),
+          title: or.binding ? `binding: the ${or.binding} \xB7 burn ${money(or.burn_usd_per_h, 3)}/h over ${or.window_hours}h` : "",
+          sub: soonest ? `${money(soonest[2], 2)} on ${soonest[0]} \xB7 ${or.binding || "credit"}` : "no balance readable"
+        }
+      ), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: "Nearest cap",
+          tone: next && next.over ? "warn" : "sub",
+          value: next ? next.over ? "over" : hrs2(next.eta_h) : "no card running",
+          title: next ? `${next.id} \xB7 ${next.assignee} \xB7 ${money(next.spend_usd, 2)} of ${money(next.cap_usd, 2)}` : "",
+          sub: next ? `${next.assignee} on ${next.id} \xB7 ${money(next.spend_usd, 2)} of ${money(next.cap_usd, 2)}` : `cap ${money(cap.base_usd, 2)} per worker, ${money(cap.ceiling_usd, 2)} extended`
+        }
+      ), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: `Cost per card \xB7 ${periodShort(win)}`,
+          tone: "money",
+          value: C.avg_usd == null ? "\u2014" : money(C.avg_usd, 3),
+          title: "mean across every card with a session in the window; subscription work counted at its cap-equivalent, not at the $0 it is invoiced",
+          sub: C.cards ? `${num(C.cards)} cards \xB7 median ${money(C.median_usd, 3)}` : "no cards in this window"
+        }
+      ), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: `Tokens per card \xB7 ${periodShort(win)}`,
+          value: tok(C.avg_tokens),
+          title: "input + output + cache reads. Cache reads dominate by design \u2014 that is the saving working, not waste.",
+          sub: C.usd_per_mtok == null ? "\u2014" : money(C.usd_per_mtok, 4) + " per million tokens"
+        }
+      ), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: `Most used \xB7 ${periodShort(win)}`,
+          value: d.most_used_model ? d.most_used_model.split("/").pop() : "\u2014",
+          title: d.most_used_model || "",
+          sub: d.most_used_share_pct != null ? d.most_used_share_pct + "% of all calls" : ""
+        }
+      ), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: "Most efficient",
+          tone: "ok",
+          value: d.best ? money(d.best.usd_per_moutput, 2) : "\u2014",
+          title: d.best ? `${d.best.model} \u2014 ${money(d.best.spend_usd, 3)} for ${tok(d.best.output)} output tokens` : "",
+          sub: d.best ? `${d.best.model.split("/").pop()} \xB7 per M output` : "not enough output to rank"
+        }
+      )), /* @__PURE__ */ h("div", { className: "fm-two" }, /* @__PURE__ */ h(
+        Section2,
+        {
+          title: "Running now \u2014 cap pressure",
+          right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, money(cap.base_usd, 2), " per worker \xB7 ", money(cap.ceiling_usd, 2), " with the one extension")
+        },
+        !(cap.cards || []).length ? /* @__PURE__ */ h("p", { className: "fm-muted fm-small" }, "No card is running.") : null,
+        (cap.cards || []).map((c) => /* @__PURE__ */ h("div", { key: c.id, className: "fm-bar-row", title: c.title }, /* @__PURE__ */ h("span", { className: "fm-bar-label" }, c.assignee, " \xB7 ", c.id), /* @__PURE__ */ h("span", { className: "fm-bar" }, /* @__PURE__ */ h("span", { className: cls2(c.over && "is-over"), style: { width: Math.min(100, c.pct || 0) + "%" } })), /* @__PURE__ */ h("span", { className: "fm-bar-val" }, money(c.spend_usd, 2), " / ", money(c.cap_usd, 2), c.burn_usd_per_h == null ? /* @__PURE__ */ h("span", { className: "fm-muted" }, " \xB7 no spend recorded yet") : /* @__PURE__ */ h("span", { className: "fm-muted" }, " \xB7 ", money(c.burn_usd_per_h, 2), "/h \xB7 ", hrs2(c.eta_h))))),
+        /* @__PURE__ */ h("p", { className: "fm-muted fm-small" }, "Measured against each card's own assignee ledger, which is what the cap gate itself reads \u2014 so this agrees with the gate rather than approximating it. A card showing no spend has no session row yet, which is not the same as costing nothing.")
+      ), /* @__PURE__ */ h(Section2, { title: `This window's cards \xB7 ${periodShort(win)}` }, /* @__PURE__ */ h("div", { className: "fm-kv" }, /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("span", null, "Cards worked"), /* @__PURE__ */ h("b", null, num(C.cards))), /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("span", null, "Cards with more than one worker"), /* @__PURE__ */ h("b", null, num(C.multi_worker_cards))), /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("span", null, "Invoiced"), /* @__PURE__ */ h("b", null, money(C.billed_usd, 2))), /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("span", null, "Subscription, at cap-equivalent"), /* @__PURE__ */ h("b", null, money(C.capeq_usd, 2))), /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("span", null, "Mean per card"), /* @__PURE__ */ h("b", null, money(C.avg_usd, 3))), /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("span", null, "Median per card"), /* @__PURE__ */ h("b", null, money(C.median_usd, 3)))), C.dearest ? /* @__PURE__ */ h("p", { className: "fm-muted fm-small" }, "Dearest card this window: ", /* @__PURE__ */ h("b", null, C.dearest.id), " at ", money(C.dearest.usd, 2), " across ", C.dearest.workers.join(", "), ".", C.dearest.workers.length > 1 ? " Multiple workers, so the per-worker cap applies to each of them separately \u2014 a pooled figure above $1 is not a breach." : "") : null, ma.exhausted ? /* @__PURE__ */ h("p", { className: "fm-muted fm-small" }, "ModelArk's 5-hour quota is exhausted", ma.reset_at ? `, resets ${ma.reset_at}` : "", " \u2014 flash traffic is falling through to DeepSeek direct.") : null)), /* @__PURE__ */ h(
+        Section2,
+        {
+          title: `Efficiency \xB7 ${periodShort(win)}`,
+          right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, "dollars per million OUTPUT tokens \u2014 lower is better")
+        },
+        /* @__PURE__ */ h("p", { className: "fm-muted fm-small" }, /* @__PURE__ */ h("b", null, "The calculation:"), " (invoiced + cap-equivalent) \xF7 output tokens \xD7 1,000,000. Output is the work; input and cache reads are what it cost to get there, so a model that reads a big cached prefix cheaply scores well for it \u2014 which is the behaviour worth rewarding. Two choices that change the ranking, stated so they can be argued with: a ", /* @__PURE__ */ h("b", null, "subscription rung is scored on its cap-equivalent, not the $0 it is invoiced"), " (at $0 it would be infinitely efficient and this column would mean nothing), and a model needs ", /* @__PURE__ */ h("b", null, tok(d.eff_min_output), " output tokens"), " in the window to be ranked at all, or three lucky calls beat a workhorse."),
+        /* @__PURE__ */ h("table", { className: "fm-table" }, /* @__PURE__ */ h("thead", null, /* @__PURE__ */ h("tr", null, /* @__PURE__ */ h("th", null, "Model"), /* @__PURE__ */ h("th", { className: "fm-num" }, "$ / M output"), /* @__PURE__ */ h("th", { className: "fm-num" }, "Output"), /* @__PURE__ */ h("th", { className: "fm-num" }, "Calls"), /* @__PURE__ */ h("th", { className: "fm-num" }, "Cache hit"), /* @__PURE__ */ h("th", { className: "fm-num" }, "Spend"), /* @__PURE__ */ h("th", null, "Basis"))), /* @__PURE__ */ h("tbody", null, (d.efficiency || []).map((e) => /* @__PURE__ */ h("tr", { key: e.model, className: cls2(!e.ranked && "is-dim") }, /* @__PURE__ */ h("td", null, e.model), /* @__PURE__ */ h("td", { className: "fm-num" }, e.usd_per_moutput == null ? "\u2014" : money(e.usd_per_moutput, 2)), /* @__PURE__ */ h("td", { className: "fm-num" }, tok(e.output)), /* @__PURE__ */ h("td", { className: "fm-num" }, num(e.calls)), /* @__PURE__ */ h("td", { className: "fm-num" }, e.cache_hit_pct == null ? "\u2014" : e.cache_hit_pct + "%"), /* @__PURE__ */ h("td", { className: "fm-num" }, money(e.spend_usd, 3)), /* @__PURE__ */ h("td", null, /* @__PURE__ */ h("span", { className: cls2("fm-tag", e.basis === "cap-equivalent" && "fm-tag--sub") }, e.basis), !e.ranked ? /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, " \xB7 too little output to rank") : null)))))
+      ), /* @__PURE__ */ h(
+        DecisionLog2,
+        {
+          entries: state.doc && state.doc.decisions || [],
+          title: "Fleet decisions",
+          empty: "No fleet-level decisions recorded."
+        }
+      ));
     }, CostsView2 = function({ doc, usage, win, width, balances }) {
       if (!usage) return /* @__PURE__ */ h("div", { className: "fm-muted" }, "Loading usage\u2026");
       const rows = usage.rows || [];
@@ -787,7 +838,7 @@
       const [uErr, setUErr] = useState(0);
       const retryT = useRef(null);
       const useq = useRef(0);
-      const [tab, setTab] = useState("fleet");
+      const [tab, setTab] = useState("home");
       const [agent, setAgent] = useState("root");
       const [modelSel, setModelSel] = useState(null);
       const [plan, setPlan] = useState(null);
@@ -941,14 +992,11 @@
       const stale = !!(usage && usage.window !== win);
       const shown = usage;
       const doc = draft;
-      const TABS = [["fleet", "Fleet"], ["agent", "Agents"], ["models", "Models & hosts"], ["costs", "Costs"], ["decisions", "Rules & history"]];
+      const TABS = [["home", "Home"], ["agent", "Agents"], ["models", "Models & hosts"], ["costs", "Costs"], ["decisions", "Rules & history"]];
       return /* @__PURE__ */ h("div", { className: "fm-root", ref: setRootEl }, /* @__PURE__ */ h("header", { className: "fm-head" }, /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("h1", null, "Fleet Models"), /* @__PURE__ */ h("div", { className: "fm-sub" }, "Every agent's waterfall from one file \u2014 ", /* @__PURE__ */ h("code", null, "~/.hermes/fleet/models.yaml"), " \xB7 revision ", state.revision, " \xB7 ", state.doc.updated_by || "\u2014", " ", ago(state.doc.updated_at))), /* @__PURE__ */ h("div", { className: "fm-row" }, /* @__PURE__ */ h(Badge2, { tone: "ok", title: "data_collection: deny on every OpenRouter call" }, "no-training \xB7 deny"), /* @__PURE__ */ h(Badge2, { tone: state.runtime.aux_routing_seam ? "ok" : "warn", title: "helper calls follow each model's pins (fleet-models plugin)" }, state.runtime.aux_routing_seam ? "helper routing on" : "helper routing off"), state.validation.errors.length ? /* @__PURE__ */ h(Badge2, { tone: "bad", title: state.validation.errors.join("\n") }, state.validation.errors.length, " rule breach") : null, /* @__PURE__ */ h("button", { className: "fm-btn", onClick: () => {
         load();
         loadUsage();
-      } }, "Refresh"))), /* @__PURE__ */ h("nav", { className: "fm-tabs" }, TABS.map(([k, l]) => /* @__PURE__ */ h("button", { key: k, className: cls2("fm-tab", tab === k && "is-active"), onClick: () => setTab(k) }, l))), movedUnder ? /* @__PURE__ */ h("div", { className: "fm-note fm-note--warn" }, "Someone applied a change while you were editing (now revision ", state.revision, "). Preview will refuse a stale edit \u2014 discard and redo it.") : null, tab === "fleet" || tab === "models" || tab === "costs" ? /* @__PURE__ */ h(PeriodBar2, { win, setWin, usage: shown, loading: uLoading, failed: uErr > 0 }) : null, /* @__PURE__ */ h("main", { className: cls2("fm-main", stale && "is-stale") }, tab === "fleet" ? /* @__PURE__ */ h(FleetView2, { state, doc, usage: shown, win: shown ? shown.window : win, onOpen: (p) => {
-        setAgent(p);
-        setTab("agent");
-      } }) : null, tab === "agent" ? /* @__PURE__ */ h(AgentView2, { state, draft, setDraft, p: agent, setP: setAgent }) : null, tab === "models" ? /* @__PURE__ */ h(ModelsView2, { draft, setDraft, usage: shown, win: shown ? shown.window : win, sel: modelSel, setSel: setModelSel }) : null, tab === "costs" ? /* @__PURE__ */ h(CostsView2, { doc, usage: shown, win: shown ? shown.window : win, width: chartW, balances: state.balances }) : null, tab === "decisions" ? /* @__PURE__ */ h(DecisionsView2, { state, draft, setDraft, onRevert: revert }) : null), dirty ? /* @__PURE__ */ h("div", { className: "fm-dock" }, /* @__PURE__ */ h("span", null, /* @__PURE__ */ h("b", null, "Unsaved changes"), " ", /* @__PURE__ */ h("span", { className: "fm-muted" }, "\u2014 nothing reaches the fleet until you apply")), /* @__PURE__ */ h("span", { className: "fm-row" }, /* @__PURE__ */ h("button", { className: "fm-btn", onClick: () => {
+      } }, "Refresh"))), /* @__PURE__ */ h("nav", { className: "fm-tabs" }, TABS.map(([k, l]) => /* @__PURE__ */ h("button", { key: k, className: cls2("fm-tab", tab === k && "is-active"), onClick: () => setTab(k) }, l))), movedUnder ? /* @__PURE__ */ h("div", { className: "fm-note fm-note--warn" }, "Someone applied a change while you were editing (now revision ", state.revision, "). Preview will refuse a stale edit \u2014 discard and redo it.") : null, tab === "home" || tab === "models" || tab === "costs" ? /* @__PURE__ */ h(PeriodBar2, { win, setWin, usage: shown, loading: uLoading, failed: uErr > 0 }) : null, /* @__PURE__ */ h("main", { className: cls2("fm-main", stale && "is-stale") }, tab === "home" ? /* @__PURE__ */ h(HomeView2, { state: { ...state, doc }, win: shown ? shown.window : win }) : null, tab === "agent" ? /* @__PURE__ */ h(AgentView2, { state, draft, setDraft, p: agent, setP: setAgent }) : null, tab === "models" ? /* @__PURE__ */ h(ModelsView2, { draft, setDraft, usage: shown, win: shown ? shown.window : win, sel: modelSel, setSel: setModelSel }) : null, tab === "costs" ? /* @__PURE__ */ h(CostsView2, { doc, usage: shown, win: shown ? shown.window : win, width: chartW, balances: state.balances }) : null, tab === "decisions" ? /* @__PURE__ */ h(DecisionsView2, { state, draft, setDraft, onRevert: revert }) : null), dirty ? /* @__PURE__ */ h("div", { className: "fm-dock" }, /* @__PURE__ */ h("span", null, /* @__PURE__ */ h("b", null, "Unsaved changes"), " ", /* @__PURE__ */ h("span", { className: "fm-muted" }, "\u2014 nothing reaches the fleet until you apply")), /* @__PURE__ */ h("span", { className: "fm-row" }, /* @__PURE__ */ h("button", { className: "fm-btn", onClick: () => {
         setDraft(clone(state.doc));
         baseRef.current = clone(state.doc);
       } }, "Discard"), /* @__PURE__ */ h("button", { className: "fm-btn fm-btn--primary", disabled: busy, onClick: preview }, busy ? "Checking\u2026" : "Preview & apply"))) : null, plan ? /* @__PURE__ */ h(
@@ -966,7 +1014,7 @@
         }
       ) : null, flash ? /* @__PURE__ */ h("div", { className: cls2("fm-flash", "fm-flash--" + flash.tone) }, flash.msg) : null);
     };
-    tickLabel = tickLabel2, isTick = isTick2, rangeLabel = rangeLabel2, cls = cls2, Pill = Pill2, Chain = Chain2, RungPicker = RungPicker2, ChainEditor = ChainEditor2, Stat = Stat2, relAge = relAge2, BalanceStats = BalanceStats2, Badge = Badge2, Section = Section2, PeriodBar = PeriodBar2, Spark = Spark2, TimeChart = TimeChart2, helperGroups = helperGroups2, AgentCard = AgentCard2, usageByProfile = usageByProfile2, FleetView = FleetView2, LiveChain = LiveChain2, SlotRow = SlotRow2, listInput = listInput2, parseList = parseList2, AgentView = AgentView2, usedBy = usedBy2, HostTable = HostTable2, ModelDetail = ModelDetail2, AddModel = AddModel2, ModelsView = ModelsView2, CostsView = CostsView2, BarList = BarList2, DecisionsView = DecisionsView2, PlanPanel = PlanPanel2, ModelsPage = ModelsPage2;
+    tickLabel = tickLabel2, isTick = isTick2, rangeLabel = rangeLabel2, cls = cls2, Pill = Pill2, Chain = Chain2, RungPicker = RungPicker2, ChainEditor = ChainEditor2, Stat = Stat2, relAge = relAge2, BalanceStats = BalanceStats2, DecisionLog = DecisionLog2, Badge = Badge2, Section = Section2, PeriodBar = PeriodBar2, Spark = Spark2, TimeChart = TimeChart2, helperGroups = helperGroups2, LiveChain = LiveChain2, SlotRow = SlotRow2, listInput = listInput2, parseList = parseList2, AgentView = AgentView2, usedBy = usedBy2, HostTable = HostTable2, ModelDetail = ModelDetail2, AddModel = AddModel2, ModelsView = ModelsView2, hrs = hrs2, HomeView = HomeView2, CostsView = CostsView2, BarList = BarList2, DecisionsView = DecisionsView2, PlanPanel = PlanPanel2, ModelsPage = ModelsPage2;
     const { React } = SDK;
     const h = React.createElement;
     const Fragment = React.Fragment;
@@ -1050,6 +1098,7 @@
       ["12h", 43200, "12 hours"],
       ["24h", 86400, "24 hours"],
       ["7d", 604800, "7 days"],
+      ["14d", 1209600, "14 days"],
       ["30d", 2592e3, "30 days"]
     ];
     const NICE = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800];
@@ -1121,15 +1170,13 @@
   var Stat;
   var relAge;
   var BalanceStats;
+  var DecisionLog;
   var Badge;
   var Section;
   var PeriodBar;
   var Spark;
   var TimeChart;
   var helperGroups;
-  var AgentCard;
-  var usageByProfile;
-  var FleetView;
   var LiveChain;
   var SlotRow;
   var listInput;
@@ -1140,6 +1187,8 @@
   var ModelDetail;
   var AddModel;
   var ModelsView;
+  var hrs;
+  var HomeView;
   var CostsView;
   var BarList;
   var DecisionsView;
