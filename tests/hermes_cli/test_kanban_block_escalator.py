@@ -176,3 +176,32 @@ def test_not_blocked_spawns_nothing(mod, monkeypatch, tmp_path):
     monkeypatch.setattr(mod.subprocess, "Popen", lambda argv, **kw: spawned.append(argv))
     mod.on_block(task_id="t_run", assignee="bob", reason="x")
     assert spawned == []
+
+
+def test_overwatch_prompt_contains_idempotency_instruction(mod, monkeypatch, tmp_path):
+    """2026-09-14, t_d8c477dd: the overwatch prompt must instruct Smith to use
+    idempotency_key on kanban_create so concurrent sessions don't mint duplicates."""
+    db = _board(tmp_path, [("t_idem", "Build X", "blocked", "capability", 0, "bob", 1.0)])
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    spawned = []
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda argv, **kw: spawned.append(argv))
+    mod.on_block(task_id="t_idem", assignee="bob", reason="workspace is empty")
+    assert len(spawned) == 1
+    prompt = spawned[0][-1]
+    assert "IDEMPOTENCY:" in prompt, "prompt must contain the IDEMPOTENCY section"
+    assert "idempotency_key" in prompt, "prompt must mention idempotency_key parameter"
+    assert "t_idem" in prompt, "prompt must reference the source task id"
+    assert "kanban_create" in prompt, "prompt must mention kanban_create"
+    assert '<title>' in prompt or 'title' in prompt, "prompt must explain how to derive the key from the title"
+
+
+def test_idempotency_slug_normalizes_correctly(mod):
+    """The slug helper produces deterministic, filesystem-safe idempotency key suffixes."""
+    assert mod._idempotency_slug("Consolidate artifact of record") == "consolidate-artifact-of-record"
+    assert mod._idempotency_slug("Bob C: read API, merge/split, audit") == "bob-c-read-api-merge-split-audit"
+    assert mod._idempotency_slug("") == ""
+    assert len(mod._idempotency_slug("a" * 100)) == 60
+    # Identical titles produce identical slugs
+    assert mod._idempotency_slug("Fix the thing") == mod._idempotency_slug("Fix the thing")
+    # Different titles produce different slugs
+    assert mod._idempotency_slug("Fix A") != mod._idempotency_slug("Fix B")

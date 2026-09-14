@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import time
@@ -71,6 +72,26 @@ NON_COST_TRIAGE_LIMIT = OVERWATCH_LIMIT  # name kept for escalation-watch
 
 HARD_CEILING_FALLBACK = 1.50
 BRIEF_DIR = Path(os.path.expanduser("~/.hermes/logs/overwatch"))
+
+# Idempotency key derivation for overwatch-minted remediation cards
+# (2026-09-14, t_d8c477dd). Two concurrent overwatch sessions working the same
+# blocked card both see "this card needs a remediation card" and both create
+# one. The idempotency_key parameter on kanban_create prevents this IF both
+# sessions derive the same key. The key format is:
+#   overwatch-{source_task_id}-{title_slug}
+# where title_slug is the remediation card's title normalized to
+# alphanumeric + hyphens, truncated to 60 chars.
+IDEMPOTENCY_KEY_PREFIX = "overwatch"
+
+
+def _idempotency_slug(text: str, max_len: int = 60) -> str:
+    """Normalize text to a safe idempotency-key suffix.
+
+    Lowercased, non-alphanumeric replaced with hyphens, consecutive hyphens
+    collapsed, leading/trailing hyphens stripped, truncated to max_len.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:max_len]
 
 
 def _hermes_bin() -> str:
@@ -285,6 +306,21 @@ AUTHORITY = (
 )
 
 
+def _idempotency_instruct(task_id: str) -> str:
+    """Idempotency instruction for the overwatch prompt, evaluated at prompt time."""
+    return (
+        "IDEMPOTENCY: When you call kanban_create to mint a remediation card for "
+        "this overwatch, pass idempotency_key=f\"overwatch-"
+        f"{task_id}"
+        "-{_idempotency_slug('<title>')}\" — replace <title> with the new card's title. "
+        "This prevents concurrent overwatch sessions from creating duplicate cards: "
+        "the second session gets the existing card id back instead of minting a twin. "
+        "When you are not sure whether a remediation card already exists, check "
+        "first by listing non-archived cards with creator_task_id matching "
+        f"{task_id}.\n\n"
+    )
+
+
 def _overwatch_prompt(task_id: str, card: dict, reason: str | None, why: str, brief_path: str, brief: str) -> str:
     return (
         f"OVERWATCH: kanban card {task_id} blocked ({why}). Block reason: {reason or '(none)'!r}.\n"
@@ -292,6 +328,7 @@ def _overwatch_prompt(task_id: str, card: dict, reason: str | None, why: str, br
         "its lineage, runs, comments, spend and any live duplicate. Ask FIRST whether this is a deeper "
         "error — duplicate card, wrong scope, dead or empty workspace, stale gate, false design premise, "
         "missing capability — and fix the cause rather than the symptom.\n\n"
+        f"{_idempotency_instruct(task_id)}"
         f"{AUTHORITY}\n\n=== BRIEF ===\n{brief}"
     )
 
