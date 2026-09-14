@@ -32,8 +32,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 PROFILES = ["root", "axel", "bob", "brain", "jobsy", "karl", "rodge", "steve-o", "switch"]
-PROVIDERS = ("modelark", "openrouter")
+PROVIDERS = ("modelark", "openrouter", "deepseek")
 OR_BASE = "https://openrouter.ai/api/v1"
+# DeepSeek direct (2026-09-15, Richie). Hermes has first-class support: agent/usage_pricing.py
+# prices deepseek-flash natively, agent/transports/chat_completions.py reads its
+# prompt_cache_hit_tokens, and model_metadata gives it 1M context + vision. So this needs no
+# providers.<name> block and no custom key env — the canonical provider and DEEPSEEK_API_KEY.
+DS_BASE = "https://api.deepseek.com"
 ARK_CODING = "https://ark.ap-southeast.bytepluses.com/api/coding/v3"
 ARK_KEY_ENV = "HERMES_CUSTOM_MODELARK_API_KEY"
 HOST_KEYS = ("only", "order", "ignore", "sort", "require_parameters", "quantizations")
@@ -172,6 +177,13 @@ def validate(doc: dict, *, previous: Optional[dict] = None, unlock: Tuple[str, .
             E.append(f"{where}: provider must be one of {PROVIDERS}")
         if m.get("reasoning") is not None and str(m["reasoning"]) not in REASONING:
             E.append(f"{where}: reasoning '{m['reasoning']}' is not a level ({', '.join(REASONING)})")
+        if m.get("provider") == "deepseek":
+            # Direct DeepSeek. No host pins (there is one host), and it is metered, not a
+            # subscription — the cap counts real dollars, so no cap_equivalent is needed.
+            if m.get("hosts"):
+                E.append(f"{where}: host pins are OpenRouter-only")
+            if m.get("billing") not in (None, "metered"):
+                W.append(f"{where}: direct DeepSeek is billing: metered")
         if m.get("provider") == "modelark":
             if m.get("billing") != "subscription":
                 W.append(f"{where}: ModelArk Coding Plan models are billing: subscription")
@@ -344,6 +356,9 @@ def compile_profile(doc: dict, p: str, d) -> List[str]:
     if prim["provider"] == "modelark" and "openrouter.ai" in str(m.get("base_url") or ""):
         _pop(m, "base_url", ch, "model")
     if prim["provider"] == "openrouter" and "bytepluses.com" in str(m.get("base_url") or ""):
+        _pop(m, "base_url", ch, "model")
+    if prim["provider"] == "deepseek" and any(
+            h in str(m.get("base_url") or "") for h in ("openrouter.ai", "bytepluses.com")):
         _pop(m, "base_url", ch, "model")
     _pop(m, "fallback_model", ch, "model")  # read by nothing
     legacy = d.get("fallback_model")

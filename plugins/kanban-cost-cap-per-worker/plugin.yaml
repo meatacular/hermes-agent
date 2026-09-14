@@ -1,0 +1,33 @@
+name: kanban-cost-cap-per-worker
+version: 1.0.0
+kind: backend
+author: Claude (Cowork) for Richie, 2026-09-15
+description: >-
+  The cap is PER WORKER PER CARD, not per card: $1.00 each, extendable once to $1.50 each, and
+  after that the card must be dealt with. Richie, 2026-09-15 — "similar to turn caps", which are
+  already per session rather than per card.
+
+  Why this is a small plugin and not a kernel change: the kernel already compares a card's cap
+  against the RUNNING ASSIGNEE'S OWN ledger (enforce_max_cost passes all_ledgers=False), so the
+  base allowance is already per worker. Two things were missing, and only two.
+
+  1. An extension travelled. set_task_max_cost writes ONE number onto the card, so raising rodge's
+     cap to $1.50 silently handed bob $1.50 as well on his first turn. This plugin normalises the
+     row back to the base whenever the current assignee is not the worker who was extended.
+
+  2. "Once" was counted per CARD. A second worker on the same card could not be extended at all,
+     which is why t_5262a7a8 consumed its one extension on the reviewer and then ran to $2.82.
+     The "once" test is now per (card, assignee), and the comment records which worker it was for.
+
+  What this does NOT change: the $1.00 base, the $1.50 hard ceiling, who may extend, or the block
+  path. The kernel still does the blocking and the teardown; this only makes the number it compares
+  the right one.
+
+  Measured on 2026-09-14, the day that prompted it: of five cards that "breached", three were not
+  breaches at all under this policy — t_02a032bd ($1.32 pooled, worst worker $0.53 across three
+  workers) and t_1440f78b ($1.16 pooled, worst worker $0.72) never had a worker near $1, and
+  t_5262a7a8's three workers were $1.10 / $1.00 / $0.71. The pooled figure was an accounting
+  artefact, not overspend. The two real outliers were both overwatch, which is not a claimed worker
+  at all and is handled by scripts/fleet-watchdogs/overwatch-cost-watch.py instead.
+
+  Fail-open in every direction: any exception leaves the kernel's own behaviour exactly as it was.
