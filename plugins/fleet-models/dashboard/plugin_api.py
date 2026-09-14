@@ -250,7 +250,14 @@ def usage(window: int = 7 * 86400, bucket: Optional[int] = None, tz: Optional[st
                 rates[str(n).lower()] = (float(ce.get("input") or 0), float(ce.get("output") or 0), float(ce.get("cache_read") or 0))
     edges = bucket_edges(since, now, b, tzi)
     nb = len(edges) - 1
-    ser = [{"billed_usd": 0.0, "calls": 0.0, "modelark_calls": 0.0} for _ in range(nb)]
+    # 2026-09-15 (Richie): "add to the dash token tracking, and track input and output tokens"
+    # and "if possible, enable tracking of cache hits on all providers". Every field below was
+    # already being READ off session_model_usage and then dropped on the floor; nothing new has to
+    # be instrumented, only carried. DeepSeek populates prompt_cache_hit_tokens natively,
+    # OpenRouter prompt_tokens_details.cached_tokens, and both land in cache_read_tokens.
+    _Z = lambda: {"billed_usd": 0.0, "calls": 0.0, "modelark_calls": 0.0,
+                  "input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    ser = [_Z() for _ in range(nb)]
     by_p: Dict[str, dict] = {}
     by_m: Dict[str, dict] = {}
     agg: Dict[tuple, dict] = {}
@@ -280,35 +287,60 @@ def usage(window: int = 7 * 86400, bucket: Optional[int] = None, tz: Optional[st
         capeq = ((inp + cw) * r[0] + out * r[1] + cr * r[2]) / 1e6 if ark else 0.0
         billed = 0.0 if ark else float(cost or 0)  # 1.x "modelark-proxy" rows stored the cap-equivalent AS cost; never invoiced
         calls = float(n or 0)
-        pp = by_p.setdefault(prof, {"calls": [0.0] * nb, "billed": [0.0] * nb})
-        mm = by_m.setdefault(model or "?", {"calls": [0.0] * nb, "billed": [0.0] * nb})
+        _zs = lambda: {"calls": [0.0] * nb, "billed": [0.0] * nb, "input": [0.0] * nb,
+                       "output": [0.0] * nb, "cache_read": [0.0] * nb}
+        pp = by_p.setdefault(prof, _zs())
+        mm = by_m.setdefault(model or "?", _zs())
         for i, f in parts:
             s_ = ser[i]
             s_["calls"] += calls * f; s_["billed_usd"] += billed * f
+            s_["input"] += inp * f; s_["output"] += out * f
+            s_["cache_read"] += cr * f; s_["cache_write"] += cw * f
             if ark:
                 s_["modelark_calls"] += calls * f
             pp["calls"][i] += calls * f; pp["billed"][i] += billed * f
+            pp["input"][i] += inp * f; pp["output"][i] += out * f; pp["cache_read"][i] += cr * f
             mm["calls"][i] += calls * f; mm["billed"][i] += billed * f
+            mm["input"][i] += inp * f; mm["output"][i] += out * f; mm["cache_read"][i] += cr * f
         k = (prof, model, host or ("ModelArk" if ark else ""), task or "main", ark)
         a = agg.setdefault(k, {"profile": prof, "model": model, "host": k[2], "task": k[3], "modelark": ark, "calls": 0.0,
-                               "input": 0.0, "output": 0.0, "cache_read": 0.0, "billed_usd": 0.0, "cap_equivalent_usd": 0.0})
-        a["calls"] += calls * frac; a["input"] += inp * frac; a["output"] += out * frac; a["cache_read"] += cr * frac
+                               "input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0,
+                               "billed_usd": 0.0, "cap_equivalent_usd": 0.0})
+        a["calls"] += calls * frac; a["input"] += inp * frac; a["output"] += out * frac
+        a["cache_read"] += cr * frac; a["cache_write"] += cw * frac
         a["billed_usd"] += billed * frac; a["cap_equivalent_usd"] += capeq * frac
 
     rows = []
     for a in agg.values():
-        for x in ("calls", "input", "output", "cache_read"):
+        for x in ("calls", "input", "output", "cache_read", "cache_write"):
             a[x] = int(round(a[x]))
+        # Cache HIT share of the prompt this route actually sent. input_tokens on a cached call is
+        # only the uncached remainder, so the denominator is input + cache_read, never input alone
+        # — the mistake that makes a 99% hit look like 0%.
+        _den = a["input"] + a["cache_read"]
+        a["cache_hit_pct"] = round(100.0 * a["cache_read"] / _den, 1) if _den else None
+        a["tokens"] = a["input"] + a["output"] + a["cache_read"]
         a["billed_usd"] = round(a["billed_usd"], 6); a["cap_equivalent_usd"] = round(a["cap_equivalent_usd"], 6)
         if a["calls"] or a["billed_usd"]:
             rows.append(a)
     series = [{"t": edges[i], "end": edges[i + 1], "partial": edges[i] < since or edges[i + 1] > now,
                "calls": round(s_["calls"], 3), "modelark_calls": round(s_["modelark_calls"], 3),
-               "billed_usd": round(s_["billed_usd"], 6)} for i, s_ in enumerate(ser)]
-    rnd = lambda d: {k: {"calls": [round(v, 3) for v in x["calls"]], "billed": [round(v, 6) for v in x["billed"]]} for k, x in d.items()}
+               "billed_usd": round(s_["billed_usd"], 6),
+               "input": int(round(s_["input"])), "output": int(round(s_["output"])),
+               "cache_read": int(round(s_["cache_read"])), "cache_write": int(round(s_["cache_write"]))}
+              for i, s_ in enumerate(ser)]
+    rnd = lambda d: {k: {"calls": [round(v, 3) for v in x["calls"]], "billed": [round(v, 6) for v in x["billed"]],
+                         "input": [int(round(v)) for v in x["input"]],
+                         "output": [int(round(v)) for v in x["output"]],
+                         "cache_read": [int(round(v)) for v in x["cache_read"]]} for k, x in d.items()}
+    tot = {k: sum(r[k] for r in rows) for k in ("calls", "input", "output", "cache_read", "cache_write")}
+    _den = tot["input"] + tot["cache_read"]
+    tot["cache_hit_pct"] = round(100.0 * tot["cache_read"] / _den, 1) if _den else None
+    tot["billed_usd"] = round(sum(r["billed_usd"] for r in rows), 6)
+    tot["cap_equivalent_usd"] = round(sum(r["cap_equivalent_usd"] for r in rows), 6)
     return {"window": window, "bucket": b, "since": since, "now": now, "tz": tzname, "days": round(window / 86400, 4),
             "method": "spread", "rows": sorted(rows, key=lambda r: (-r["billed_usd"], -r["calls"])), "series": series,
-            "by_profile": rnd(by_p), "by_model": rnd(by_m), "generated_at": time.time()}
+            "by_profile": rnd(by_p), "by_model": rnd(by_m), "totals": tot, "generated_at": time.time()}
 
 
 def _caps(root: Path) -> dict:
@@ -397,6 +429,84 @@ def post_apply(ch: Change):
     core = _core()
     return core.apply(ch.doc, by="dashboard", summary=ch.summary[:200], root=_root(),
                       base_revision=ch.base_revision, unlock=tuple(ch.unlock), snapshot=_uptime_snapshot(ch.doc))
+
+
+# ── the model catalogue, for the "add any OpenRouter model to a waterfall" picker ─────────────
+# Richie, 2026-09-15: "add to the dash the ability to find and search, and add any open router
+# model dynamically to the waterfall. Do this via a dropdown menu for each waterfall."
+#
+# Adding the model is already possible: /plan and /apply take the WHOLE document, so a new
+# registry entry and a new rung are an ordinary doc edit. What was missing was the list to pick
+# FROM. This is that list — OpenRouter's public catalogue, filtered, with the fields the picker
+# needs to show a sane row and the fields models.yaml needs to accept it.
+_CAT: Dict[str, Any] = {"at": 0.0, "models": []}
+_CAT_TTL = 900
+_CAT_LOCK = threading.Lock()
+
+
+def _catalogue(fresh: bool = False) -> List[dict]:
+    with _CAT_LOCK:
+        if not fresh and _CAT["models"] and (time.time() - _CAT["at"]) < _CAT_TTL:
+            return _CAT["models"]
+    try:
+        req = urllib.request.Request("https://openrouter.ai/api/v1/models",
+                                     headers={"User-Agent": "hermes-fleet-models"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode())
+    except Exception:  # noqa: BLE001 — a picker that cannot reach the catalogue shows the cache
+        return _CAT["models"]
+    out = []
+    for m in data.get("data") or []:
+        pr = m.get("pricing") or {}
+        arch = m.get("architecture") or {}
+        sup = m.get("supported_parameters") or []
+        mods = arch.get("input_modalities") or []
+        out.append({
+            "id": m.get("id"),
+            "name": m.get("name") or m.get("id"),
+            "vendor": str(m.get("id") or "").split("/")[0],
+            "context": m.get("context_length"),
+            # $/M, the unit the rest of this page speaks
+            "prompt_per_m": _per_m(pr.get("prompt")),
+            "completion_per_m": _per_m(pr.get("completion")),
+            "cache_read_per_m": _per_m(pr.get("input_cache_read")),
+            "cache_write_per_m": _per_m(pr.get("input_cache_write")),
+            "tools": "tools" in sup or "tool_choice" in sup,
+            "reasoning": "reasoning" in sup or "include_reasoning" in sup,
+            "vision": "image" in mods,
+            "modalities": mods,
+        })
+    out.sort(key=lambda x: (x["vendor"] or "", x["id"] or ""))
+    with _CAT_LOCK:
+        _CAT["models"] = out
+        _CAT["at"] = time.time()
+    return out
+
+
+@router.get("/catalogue")
+def get_catalogue(q: Optional[str] = None, tools: Optional[bool] = None,
+                  vision: Optional[bool] = None, limit: int = 200, fresh: bool = False):
+    """Searchable OpenRouter catalogue for the per-waterfall picker.
+
+    `q` matches id, name or vendor, case-insensitively, on every whitespace-separated term — so
+    "deep flash" finds deepseek flash models without needing the exact slug. A rung must be able
+    to run an agent loop, so the picker can filter on tool calling; `vision` filters the aux.vision
+    chains, whose every rung has to accept images (core.py validates that and would refuse an
+    apply otherwise — better to not offer it than to be refused).
+    """
+    rows = _catalogue(fresh=fresh)
+    if q:
+        terms = [t for t in str(q).lower().split() if t]
+        rows = [m for m in rows
+                if all(t in f"{m['id']} {m['name']} {m['vendor']}".lower() for t in terms)]
+    if tools is not None:
+        rows = [m for m in rows if bool(m["tools"]) is bool(tools)]
+    if vision is not None:
+        rows = [m for m in rows if bool(m["vision"]) is bool(vision)]
+    total = len(rows)
+    return {"total": total, "shown": min(total, max(1, int(limit))),
+            "stale": bool(_CAT["at"] and (time.time() - _CAT["at"]) > _CAT_TTL),
+            "fetched_at": _CAT["at"], "models": rows[:max(1, int(limit))]}
 
 
 class Revert(BaseModel):

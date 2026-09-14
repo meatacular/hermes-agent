@@ -132,8 +132,107 @@ function Chain({ doc, chain, empty }) {
   );
 }
 
-function ChainEditor({ doc, chain, onChange, filter }) {
+// Richie, 2026-09-15: "add to the dash the ability to find and search, and add any open router
+// model dynamically to the waterfall. Do this via a dropdown menu for each waterfall."
+// The registry options stay exactly where they were; underneath them is a live search over
+// OpenRouter's whole catalogue. Choosing a catalogue model registers it AND appends it as a rung
+// in one action, because the two halves were never useful separately.
+function RungPicker({ doc, chain, onChange, setDraft, filter, wantsVision }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState(null);
+  const [busy, setBusy] = useState(false);
   const opts = Object.keys(doc.models || {}).filter((a) => !chain.includes(a) && (!filter || filter(doc.models[a])));
+  const known = useMemo(() => new Set(Object.values(doc.models || {}).map((m) => m.id)), [doc.models]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    // A rung has to be able to run its lane: every slot needs tool calling, and core.py REFUSES
+    // an apply where a vision rung cannot accept images — so filter here rather than offer a
+    // model the apply would reject.
+    const qs = new URLSearchParams({ tools: "true", limit: "40" });
+    if (q.trim()) qs.set("q", q.trim());
+    if (wantsVision) qs.set("vision", "true");
+    const t = setTimeout(() => {
+      setBusy(true);
+      fetchJSON(`${API}/catalogue?${qs}`)
+        .then((r) => { setHits(r); setBusy(false); })
+        .catch((e) => { setHits({ error: String(e.message || e), models: [] }); setBusy(false); });
+    }, 220);
+    return () => clearTimeout(t);
+  }, [open, q, wantsVision]);
+
+  const addFromCatalogue = (m) => {
+    const base = String(m.id).split("/").pop().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    let alias = base, n = 2;
+    while (doc.models && doc.models[alias]) { alias = base + "-" + n; n += 1; }
+    setDraft((d) => {
+      const nd = clone(d);
+      nd.models[alias] = {
+        id: m.id, short: String(m.id).split("/").pop(), provider: "openrouter",
+        vendor: m.vendor || String(m.id).split("/")[0], billing: "metered",
+        context: m.context || undefined, tools: !!m.tools, vision: !!m.vision,
+        notes: `Added from the dashboard picker ${new Date().toISOString().slice(0, 10)}. ` +
+               `OpenRouter list at add time: $${m.prompt_per_m ?? "?"}/M in, $${m.completion_per_m ?? "?"}/M out` +
+               (m.cache_read_per_m != null ? `, $${m.cache_read_per_m}/M cache read` : ", cache read not published") + ".",
+      };
+      return nd;
+    });
+    onChange(chain.concat([alias]));
+    setOpen(false); setQ(""); setHits(null);
+  };
+
+  if (!open) {
+    return (
+      <span className="fm-rungpick">
+        {opts.length ? (
+          <select className="fm-add" value="" onChange={(e) => e.target.value && onChange(chain.concat([e.target.value]))}>
+            <option value="">+ rung</option>
+            {opts.map((a) => <option key={a} value={a}>{doc.models[a].short || a}</option>)}
+          </select>
+        ) : null}
+        {setDraft ? <button className="fm-link fm-rungpick-open" onClick={() => setOpen(true)}
+          title="search every OpenRouter model and add one as a rung">+ search…</button> : null}
+      </span>
+    );
+  }
+  const rows = (hits && hits.models) || [];
+  return (
+    <div className="fm-rungpick fm-rungpick--open">
+      <div className="fm-row">
+        <input autoFocus className="fm-rungpick-q" placeholder="search OpenRouter — e.g. deepseek flash"
+          value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setOpen(false)} />
+        <button className="fm-link" onClick={() => setOpen(false)}>close</button>
+      </div>
+      <div className="fm-rungpick-list">
+        {busy && !rows.length ? <div className="fm-muted fm-small">searching…</div> : null}
+        {hits && hits.error ? <div className="fm-bad fm-small">{hits.error}</div> : null}
+        {!busy && hits && !rows.length && !hits.error ? <div className="fm-muted fm-small">nothing matches</div> : null}
+        {rows.map((m) => {
+          const already = known.has(m.id);
+          return (
+            <button key={m.id} className="fm-rungpick-row" disabled={already}
+              title={already ? "already in the registry — pick it from + rung" : "add to the registry and append as a rung"}
+              onClick={() => addFromCatalogue(m)}>
+              <span className="fm-rungpick-id">{m.id}</span>
+              <span className="fm-rungpick-meta">
+                {m.context ? `${Math.round(m.context / 1000)}k` : "—"}
+                {" · "}${m.prompt_per_m ?? "?"}/M in · ${m.completion_per_m ?? "?"}/M out
+                {m.cache_read_per_m != null ? ` · $${m.cache_read_per_m}/M cache` : ""}
+                {m.vision ? " · vision" : ""}{already ? " · in registry" : ""}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {hits && hits.total > rows.length ? (
+        <div className="fm-muted fm-small">{rows.length} of {hits.total} — narrow the search</div>
+      ) : null}
+    </div>
+  );
+}
+
+function ChainEditor({ doc, chain, onChange, filter, setDraft, wantsVision }) {
   const move = (i, d) => { const c = chain.slice(); const [x] = c.splice(i, 1); c.splice(i + d, 0, x); onChange(c); };
   return (
     <span className="fm-chain fm-chain--edit">
@@ -145,12 +244,8 @@ function ChainEditor({ doc, chain, onChange, filter }) {
             onRemove={chain.length > 1 ? () => onChange(chain.filter((_, j) => j !== i)) : null} />
         </Fragment>
       ))}
-      {opts.length ? (
-        <select className="fm-add" value="" onChange={(e) => e.target.value && onChange(chain.concat([e.target.value]))}>
-          <option value="">+ rung</option>
-          {opts.map((a) => <option key={a} value={a}>{doc.models[a].short || a}</option>)}
-        </select>
-      ) : null}
+      <RungPicker doc={doc} chain={chain} onChange={onChange} setDraft={setDraft}
+        filter={filter} wantsVision={wantsVision} />
     </span>
   );
 }
@@ -370,7 +465,7 @@ function LiveChain({ doc, live }) {
   );
 }
 
-function SlotRow({ doc, label, spec, live, onChange, nullable, nullLabel, withReasoning, filter, onDelete, hint }) {
+function SlotRow({ doc, label, spec, live, onChange, nullable, nullLabel, withReasoning, filter, onDelete, hint, setDraft, wantsVision }) {
   const chain = chainOf(spec);
   const isNull = spec == null;
   const primary = Object.keys(doc.models || {}).find((a) => !filter || filter(doc.models[a]));
@@ -384,7 +479,8 @@ function SlotRow({ doc, label, spec, live, onChange, nullable, nullLabel, withRe
         {isNull ? (
           <span className="fm-muted">{nullLabel} <button className="fm-link" onClick={() => onChange([primary])}>set a chain</button></span>
         ) : (
-          <ChainEditor doc={doc} chain={chain} filter={filter} onChange={(c) => onChange(withChain(spec, c))} />
+          <ChainEditor doc={doc} chain={chain} filter={filter} setDraft={setDraft} wantsVision={wantsVision}
+            onChange={(c) => onChange(withChain(spec, c))} />
         )}
         <div className="fm-slot-live">live: <LiveChain doc={doc} live={live} /></div>
       </div>
@@ -430,15 +526,16 @@ function AgentView({ state, draft, setDraft, p, setP }) {
         </span>}>
         {drift ? <div className="fm-note fm-note--warn">{drift.map((d, i) => <div key={i}>{d}</div>)}<div>Applying any change rewrites this profile from models.yaml.</div></div> : null}
         <div className="fm-slots-edit">
-          <SlotRow doc={draft} label="Main loop" hint="primary → fallbacks" spec={a.main} live={live.main} filter={toolsOk}
+          <SlotRow doc={draft} setDraft={setDraft} label="Main loop" hint="primary → fallbacks" spec={a.main} live={live.main} filter={toolsOk}
             onChange={(c) => set((x) => { x.main = c; })} />
-          <SlotRow doc={draft} label="Subagents" hint="delegated children — their own chain" spec={a.subagents} live={live.subagents}
+          <SlotRow doc={draft} setDraft={setDraft} label="Subagents" hint="delegated children — their own chain" spec={a.subagents} live={live.subagents}
             nullable nullLabel="inherit main" filter={toolsOk} onChange={(c) => set((x) => { x.subagents = c; })} />
-          <SlotRow doc={draft} label="Cron jobs" hint="scheduled jobs on this profile" spec={a.cron} live={live.cron}
+          <SlotRow doc={draft} setDraft={setDraft} label="Cron jobs" hint="scheduled jobs on this profile" spec={a.cron} live={live.cron}
             nullable nullLabel="Hermes default" filter={toolsOk} onChange={(c) => set((x) => { x.cron = c; })} />
           {Object.keys(aux).sort((x, y) => (x === "vision" ? -1 : y === "vision" ? 1 : x.localeCompare(y))).map((t) => (
-            <SlotRow key={t} doc={draft} label={TASK_LABEL[t] || t} hint={t === "vision" ? "images — every rung must accept them" : "auxiliary task"}
-              spec={aux[t]} live={(live.aux || {})[t] ? live.aux[t].chain : null} withReasoning filter={t === "vision" ? visionOk : null}
+            <SlotRow key={t} doc={draft} setDraft={setDraft} label={TASK_LABEL[t] || t} hint={t === "vision" ? "images — every rung must accept them" : "auxiliary task"}
+              spec={aux[t]} live={(live.aux || {})[t] ? live.aux[t].chain : null} withReasoning
+              filter={t === "vision" ? visionOk : null} wantsVision={t === "vision"}
               onChange={(c) => set((x) => { x.aux[t] = c; })} onDelete={() => set((x) => { delete x.aux[t]; })} />
           ))}
           {unusedTasks.length ? (
