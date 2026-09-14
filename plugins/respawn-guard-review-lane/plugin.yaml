@@ -1,0 +1,7 @@
+name: respawn-guard-review-lane
+version: 0.1.0
+kind: backend
+author: WeRoll fleet
+description: >-
+  Prevents the active-PR respawn guard from blocking review and changes-requested
+  rework cards while preserving duplicate-PR protection for ordinary work cards.
