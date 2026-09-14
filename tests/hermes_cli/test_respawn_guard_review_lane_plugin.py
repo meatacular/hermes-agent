@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 
-_PLUGIN = Path.home() / ".hermes" / "plugins" / "respawn-guard-review-lane" / "__init__.py"
+_PLUGIN = Path(__file__).resolve().parents[2] / "plugins" / "respawn-guard-review-lane" / "__init__.py"
 _spec = importlib.util.spec_from_file_location("respawn_guard_review_lane", _PLUGIN)
 assert _spec is not None and _spec.loader is not None
 _plugin = importlib.util.module_from_spec(_spec)
@@ -34,6 +34,20 @@ def _active_pr(_conn, _task_id, *, lane="ready"):
 
 def test_ac1_ordinary_card_keeps_active_pr_guard():
     assert _plugin.wrap_check_respawn_guard(_active_pr)(_db(), "t1") == "active_pr"
+
+
+def test_plugin_install_wraps_dispatcher_global_and_suppresses_reviewer():
+    from hermes_cli import kanban_db_dispatch
+
+    original = kanban_db_dispatch.check_respawn_guard
+    try:
+        kanban_db_dispatch.check_respawn_guard = _active_pr
+        _plugin.install()
+        installed = kanban_db_dispatch.check_respawn_guard
+        assert getattr(installed, _plugin._MARKER, False)
+        assert installed(_db(assignee="rodge"), "t1") is None
+    finally:
+        kanban_db_dispatch.check_respawn_guard = original
 
 
 def test_ac2_reviewer_assignee_suppresses_active_pr():
