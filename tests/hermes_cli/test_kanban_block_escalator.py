@@ -121,6 +121,39 @@ def test_overwatch_child_is_not_spawned_as_a_kanban_worker(mod, monkeypatch, tmp
     assert _os.environ.get("HERMES_KANBAN_TASK") == "t_env"
 
 
+def test_overwatch_child_is_signed_as_the_assessor(mod, monkeypatch, tmp_path):
+    """2026-09-15, card t_56500e82.
+
+    The same env inheritance carried ``HERMES_PROFILE``. ``-p <assessor>`` picks the child's home
+    — measured, overwatch spend lands in root's ledger every time — but it does not rewrite
+    ``os.environ``, and ``tools/kanban_tools.py`` signs a comment with
+    ``os.environ.get("HERMES_PROFILE") or "worker"``. So an overwatch ruling spawned from a blocked
+    bob worker was authored **bob**: the assessor signing as the worker it is overruling, in a
+    comment that is injected verbatim into the next worker's system prompt.
+
+    The variable must be SET to the assessor, not removed — removing it signs the ruling "worker".
+    """
+    db = _board(tmp_path, [("t_prof", "Build X", "blocked", "capability", 0, "bob", 1.0)])
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    monkeypatch.setenv("HERMES_PROFILE", "rodge")          # the blocked worker's own profile
+    monkeypatch.setenv("HERMES_PROFILE_NAME", "rodge")
+    envs = []
+    monkeypatch.setattr(mod.subprocess, "Popen",
+                        lambda argv, **kw: envs.append(kw.get("env") or {}))
+    mod.on_block(task_id="t_prof", assignee="bob", reason="workspace is empty")
+    assert len(envs) == 1
+    child = envs[0]
+    assert child.get("HERMES_PROFILE") == mod.OVERWATCH == "default"
+    # Both readers: kanban_tools signs from HERMES_PROFILE, the CLI's _profile_author prefers
+    # HERMES_PROFILE_NAME. Fixing one and not the other leaves half the board misattributed.
+    assert child.get("HERMES_PROFILE_NAME") == mod.OVERWATCH
+    # They must be PRESENT, not merely different: an absent var signs the ruling "worker".
+    assert "HERMES_PROFILE" in child and "HERMES_PROFILE_NAME" in child
+    # Negative control: the parent keeps its own value, so this cannot pass by mutating os.environ.
+    import os as _os
+    assert _os.environ.get("HERMES_PROFILE") == "rodge"
+
+
 def test_hold_dependency_and_first_transient_spawn_nothing(mod, monkeypatch, tmp_path):
     db = _board(tmp_path, [("t_hold", "x", "blocked", "operator_hold", 0, "bob", 1.0),
                            ("t_dep", "x", "todo", "dependency", 0, "bob", 1.0),

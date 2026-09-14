@@ -424,6 +424,25 @@ def _spawn(assessor: str, prompt: str, task_id: str) -> None:
         # assessor reported "the checkpoint cut MY turn too".
         for _worker_var in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID"):
             env.pop(_worker_var, None)
+        # 2026-09-15, card t_56500e82: the same inheritance also carried HERMES_PROFILE. `-p
+        # <assessor>` decides which home the child runs against — measured, overwatch spend lands
+        # in root's ledger every time — but it does NOT rewrite os.environ, and
+        # tools/kanban_tools.py reads `os.environ["HERMES_PROFILE"]` to sign a comment. So an
+        # overwatch ruling spawned from a blocked rodge worker was authored "rodge", and one from
+        # bob was authored "bob". You can read it on t_796c3fab: a comment opening `overwatch:`,
+        # signed **bob**, which is the assessor overruling the very worker it is named after.
+        # Those comments are injected verbatim into the next worker's system prompt, so the
+        # attribution is not cosmetic — it is what a future worker believes about who ruled.
+        #
+        # SET it, never pop it: `author = os.environ.get("HERMES_PROFILE") or "worker"`, so an
+        # unset variable signs the ruling "worker", which is worse than a wrong profile name.
+        env["HERMES_PROFILE"] = assessor
+        # Two readers, two variables. tools/kanban_tools.py signs comments (:767) and
+        # created_by (:936) from HERMES_PROFILE; hermes_cli/kanban.py's _profile_author
+        # (:201) prefers HERMES_PROFILE_NAME and only then falls back to it. Setting one
+        # and not the other would fix the tool path and leave the CLI path signing the
+        # worker — so both carry the assessor.
+        env["HERMES_PROFILE_NAME"] = assessor
         claim = str(_claim_path(task_id))
         command = "trap 'rm -f -- \"$1\"' EXIT; shift; exec \"$@\""
         subprocess.Popen(
