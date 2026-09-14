@@ -19,6 +19,7 @@ MUST_BLOCK = [
     ("Build: orgagent module + GET /api/orgagent/health + test", "rodge"),
     ("Fix brain search agent grounding regressions", "axel"),
     ("[platform] Plumb BACKUPBRAIN_API_KEY into disposable backend env", "axel"),
+    ("Fix something", "someone-unknown"),   # names no profile -> can never dispatch (applyq-002)
 ]
 
 # Every other card minted that day, plus the shapes that must stay legal.
@@ -40,7 +41,6 @@ MUST_ALLOW = [
     # shapes that must not trip it
     ("Fix brain search agent grounding regressions", ""),          # no assignee
     ("", "axel"),                                                   # no title
-    ("Fix something", "someone-unknown"),                           # unknown name: core parks it
 ]
 
 
@@ -208,3 +208,47 @@ def test_control_the_widening_is_not_vacuous(monkeypatch):
     monkeypatch.setattr(mg, "EDIT_VERB_LINE", narrow)
     assert mg.kernel_edit_line(DCAF62_BODY) is None      # the old list really did miss it
     assert mg.kernel_edit_line("Patch hermes_cli/kanban_db.py") is not None   # and still worked otherwise
+
+
+# --- phantom assignee (2026-09-14, applyq-002) -------------------------------
+# The board's own create-time check skips cards created `blocked`; this rule does not.
+
+def test_phantom_assignee_is_refused(monkeypatch):
+    monkeypatch.setattr(mg, "_assignee_is_phantom", lambda a: a == "smith")
+    r = mg.on_pre_tool_call(tool_name="kanban_create",
+                            args={"title": "Deploy: ship it", "assignee": "smith",
+                                  "body": "merge the PR", "initial_status": "blocked"})
+    assert r and r.get("action") == "block"
+    assert "no Hermes profile" in r["message"]
+
+
+def test_a_known_profile_is_untouched(monkeypatch):
+    monkeypatch.setattr(mg, "_assignee_is_phantom", lambda a: True)   # would fire if reached
+    assert mg.verdict("Build: the thing", "bob", "write it") is None
+
+
+def test_an_unknown_but_REAL_profile_is_untouched(monkeypatch):
+    """Not in KNOWN is not the same as not existing — a new profile must still mint."""
+    monkeypatch.setattr(mg, "_assignee_is_phantom", lambda a: False)
+    assert mg.verdict("Build: the thing", "some-new-profile", "write it") is None
+
+
+def test_control_the_rule_is_not_vacuous(monkeypatch):
+    monkeypatch.setattr(mg, "_assignee_is_phantom", lambda a: True)
+    assert mg.verdict("Build: the thing", "some-new-profile", "write it") is not None
+
+
+def test_phantom_check_fails_OPEN_when_the_profile_layer_raises(monkeypatch):
+    import builtins
+    real = builtins.__import__
+    def boom(name, *a, **k):
+        if name == "hermes_cli.profiles":
+            raise ImportError("simulated")
+        return real(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", boom)
+    assert mg._assignee_is_phantom("definitely-not-a-profile") is False
+
+
+def test_an_empty_assignee_is_not_a_phantom():
+    assert mg._assignee_is_phantom("") is False
+    assert mg._assignee_is_phantom(None) is False

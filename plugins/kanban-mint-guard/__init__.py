@@ -147,6 +147,24 @@ def _marker_owner(title: str) -> Optional[str]:
     return name if name in KNOWN else None      # "[platform]" is not an owner
 
 
+# --- phantom assignee (2026-09-14, applyq-002) -------------------------------
+# The narrow import is deliberate: ONE small, long-stable public function, the same shape the
+# completion gate uses, and it means the persona aliases (smith -> default) resolve from their
+# single source of truth instead of a second list here that would drift. Lazy and
+# exception-guarded -- a guard must never become a crash surface, so if the profile layer cannot
+# be read the answer is "known" and the card passes.
+def _assignee_is_phantom(assignee) -> bool:
+    """True only when *assignee* is set and provably names no profile."""
+    name = str(assignee or "").strip()
+    if not name:
+        return False                       # unassigned is a different rule's problem
+    try:
+        from hermes_cli.profiles import profile_exists
+        return not profile_exists(name)
+    except Exception:                      # noqa: BLE001 -- fail OPEN, never block on our own error
+        return False
+
+
 def verdict(title: str, assignee: str, body: str = "") -> Optional[str]:
     """Pure decision function — unit-tested. Returns a refusal reason, or None."""
     # The kernel rule is about the DELIVERABLE, so it is independent of assignee and runs
@@ -160,7 +178,16 @@ def verdict(title: str, assignee: str, body: str = "") -> Optional[str]:
     if not a or not (title or "").strip():
         return None                              # nothing to contradict
     if a not in KNOWN:
-        return None                              # unknown names are core's job (it parks them)
+        # This used to read "unknown names are core's job (it parks them)". Core does park them --
+        # EXCEPT on a card created `blocked`, where the create-time check is deliberately skipped
+        # ("a blocked card is never dispatched anyway"). True at create time, false at unblock:
+        # 2026-09-13, t_6d53f54c was minted blocked/operator_hold with assignee `smith`, nothing
+        # complained for two hours, and releasing the hold produced a silent re-block with
+        # kind=null. That carve-out is upstream's and not ours to change, so the hole is closed
+        # here instead, at the tool path, where initial status is irrelevant.
+        if _assignee_is_phantom(assignee):
+            return f"assignee {assignee!r} names no Hermes profile, so this card can never dispatch"
+        return None
     if OVERRIDE in (body or "").lower():
         return None                              # deliberate cross-lane, declared
 
