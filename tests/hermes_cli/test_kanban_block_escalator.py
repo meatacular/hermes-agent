@@ -51,6 +51,10 @@ def _board(tmp_path, rows, comments=()):
 def mod(monkeypatch, tmp_path):
     m = _load_plugin_module()
     m.BRIEF_DIR = tmp_path / "briefs"
+    # The per-card overwatch lease writes a real file. Without this the suite dropped fixture
+    # claims (t_cap, t_env, t_ext, t_c1) into ~/.hermes/state/overwatch — live state, named after
+    # cards that do not exist — and a re-run could be suppressed by its own leftover lease.
+    monkeypatch.setattr(m, "CLAIM_DIR", tmp_path / "claims")
     monkeypatch.setattr(m, "_hard_ceiling", lambda: 1.50)
     return m
 
@@ -75,7 +79,12 @@ def test_fault_block_spawns_one_smith_session_with_brief(mod, monkeypatch, tmp_p
     spawned = []
     monkeypatch.setattr(mod.subprocess, "Popen", lambda argv, **kw: spawned.append(argv))
     mod.on_block(task_id="t_cap", assignee="bob", reason="workspace is empty")
-    assert len(spawned) == 1 and spawned[0][2] == "default"
+    assert len(spawned) == 1
+    # The spawn is wrapped in `/bin/sh -c <trap> overwatch <claim> <hermes> -p <profile> …` so the
+    # lease is released on exit or signal. Assert on the flag, not on a fixed index: pinning argv
+    # position made this test fail on a change that kept the behaviour exactly (2026-09-15).
+    argv = spawned[0]
+    assert argv[argv.index("-p") + 1] == "default"
     prompt = spawned[0][-1]
     assert prompt.startswith("OVERWATCH:") and "overwatch:" in prompt and "set-cap" in prompt
     assert "Build X" in prompt  # the brief is inline

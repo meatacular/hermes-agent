@@ -45,6 +45,9 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
+import json
+import errno
 import time
 from pathlib import Path
 
@@ -72,6 +75,8 @@ NON_COST_TRIAGE_LIMIT = OVERWATCH_LIMIT  # name kept for escalation-watch
 
 HARD_CEILING_FALLBACK = 1.50
 BRIEF_DIR = Path(os.path.expanduser("~/.hermes/logs/overwatch"))
+CLAIM_DIR = Path(os.environ.get("HERMES_OVERWATCH_CLAIM_DIR", "~/.hermes/state/overwatch")).expanduser()
+CLAIM_TTL_SECONDS = 15 * 60
 
 # Idempotency key derivation for overwatch-minted remediation cards
 # (2026-09-14, t_d8c477dd). Two concurrent overwatch sessions working the same
@@ -82,6 +87,64 @@ BRIEF_DIR = Path(os.path.expanduser("~/.hermes/logs/overwatch"))
 # where title_slug is the remediation card's title normalized to
 # alphanumeric + hyphens, truncated to 60 chars.
 IDEMPOTENCY_KEY_PREFIX = "overwatch"
+
+
+def _claim_path(task_id: str) -> Path:
+    return CLAIM_DIR / f"{task_id}.claim"
+
+
+def _record_claim_skip(task_id: str, holder: int | str, reason: str) -> None:
+    logger.info("kanban-block-escalator: skipped overwatch for %s; holder=%s reason=%s", task_id, holder, reason)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError as exc:
+        return exc.errno == errno.EPERM
+    return True
+
+
+def _claim_overwatch(task_id: str, reason: str) -> bool:
+    """Take one per-card lease, atomically; reap dead/expired holders."""
+    CLAIM_DIR.mkdir(parents=True, exist_ok=True)
+    path = _claim_path(task_id)
+    payload = {"pid": os.getpid(), "created_at": time.time(), "reason": reason}
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                json.dump(payload, handle)
+            return True
+        except FileExistsError:
+            try:
+                holder = json.loads(path.read_text())
+                pid = int(holder.get("pid", 0))
+                stale = time.time() - float(holder.get("created_at", 0)) > CLAIM_TTL_SECONDS
+                if not stale and _pid_alive(pid):
+                    _record_claim_skip(task_id, pid, reason)
+                    return False
+                path.unlink()
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+    return False
+
+
+def _release_overwatch(task_id: str) -> None:
+    try:
+        _claim_path(task_id).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def review_handoff_reclaim_allowed(latest_event: str | None, reason: str | None) -> bool:
+    """A live review handoff is protected unless the operator explicitly overrides."""
+    return latest_event != "review_requested" or (reason or "").startswith("override-review-handoff:")
 
 
 def _idempotency_slug(text: str, max_len: int = 60) -> str:
@@ -346,6 +409,8 @@ def _rundown_prompt(task_id: str, reason: str | None, why: str, brief_path: str,
 
 
 def _spawn(assessor: str, prompt: str, task_id: str) -> None:
+    if not _claim_overwatch(task_id, "spawn"):
+        return
     try:
         env = dict(os.environ)
         env["HERMES_OVERWATCH_TASK"] = task_id
@@ -359,11 +424,15 @@ def _spawn(assessor: str, prompt: str, task_id: str) -> None:
         # assessor reported "the checkpoint cut MY turn too".
         for _worker_var in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID"):
             env.pop(_worker_var, None)
+        claim = str(_claim_path(task_id))
+        command = "trap 'rm -f -- \"$1\"' EXIT; shift; exec \"$@\""
         subprocess.Popen(
-            [_hermes_bin(), "-p", assessor, "--cli", "chat", "-q", prompt],
+            ["/bin/sh", "-c", command, "overwatch", claim, _hermes_bin(), "-p", assessor, "--cli", "chat", "-q", prompt],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True, close_fds=True, env=env,
         )
+        # The shell owns the lease and removes it on normal exit or signal.
+        # A crashed process is recovered by _claim_overwatch on the next tick.
         logger.info("kanban-block-escalator: overwatch spawned for %s (%s)", task_id, assessor)
     except Exception as exc:  # noqa: BLE001
         logger.warning("kanban-block-escalator: failed to spawn overwatch for %s: %s", task_id, exc)
