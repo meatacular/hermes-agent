@@ -10,12 +10,34 @@ dispatch resolves clone B.
 AC1  a retry keeps the prior run's commits on its branch
 AC2  the worker can ``git log`` them and continue
 AC3  a first provision still creates from base (regression)
+
+Naming (charter §7) — the mapping is readable from collection:
+
+    plugin AC1 -> test_ac1_retry_keeps_the_prior_commits_on_its_branch
+    plugin AC2 -> test_ac2_worker_can_read_and_continue_the_carried_work
+    plugin AC3 -> test_ac3_first_provision_still_creates_from_base
+
+Follow-up card t_2a901db6:
+
+    AC1 -> test_profile_home_resolves_to_the_shared_board
+           (+ test_profile_home_resolution_mirrors_the_kernel)
+    AC2 -> test_remote_candidate_never_touches_the_network
+    AC3 -> test_cleared_anchor_falls_back_to_board_default_workdir
+    AC4 -> this file, run as:
+           env -u HERMES_DELEGATED_CHILD_CONTEXT <venv>/bin/python -m pytest \
+               plugins/kanban-worktree-carryover/test_kanban_worktree_carryover.py \
+               -q -p no:randomly
+    AC5 -> test_root_home_path_is_unchanged (self-contained twin of the live
+           calibration: t_17ee37d5 -> "branch already present in target repo",
+           first provisions -> "first provision")
+    AC6 -> test_plugin_has_zero_merge_surface + test_manifest_is_a_bundled_backend
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -28,6 +50,9 @@ _REPO_ROOT = _PLUGIN_DIR.parents[1]
 BRANCH = "proj/t_retry0001-weekly-digest"
 TASK = "t_retry0001"
 HOOK = "kanban_task_claimed"
+
+#: write_board()'s default anchor is the target clone; pass None for SQL NULL.
+_DEFAULT_WS = object()
 
 
 def _load_plugin():
@@ -99,12 +124,17 @@ class Incident:
 
     # -- board -------------------------------------------------------------
     def write_board(self, runs: int = 2, anchor: bool = True,
-                    workspace_path: str | None = None) -> None:
+                    workspace_path=_DEFAULT_WS) -> None:
+        """Seed the board. ``workspace_path=None`` writes SQL NULL — the shape the
+        09-14 incident actually had (the path was cleared mid retry-cycle so the
+        board anchor fell back to the board's ``default_workdir``). Omit it for
+        the ordinary shape, where the card points at the target clone."""
         from hermes_cli import kanban_db_connect as kbc
 
         kbc.init_db(db_path=self.db)
         import sqlite3
 
+        ws_value = str(self.target_ws) if workspace_path is _DEFAULT_WS else workspace_path
         conn = sqlite3.connect(self.db)
         try:
             conn.execute(
@@ -112,7 +142,7 @@ class Incident:
                 " workspace_path, branch_name, tenant, created_at, created_by, max_cost, "
                 " block_kind, project_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (TASK, "[Bob] WP7-B weekly digest", "", "bob", "running", "worktree",
-                 workspace_path or str(self.target_ws), BRANCH, None, int(time.time()),
+                 ws_value, BRANCH, None, int(time.time()),
                  "jobsy", 1.0, None, "p_5fe7127d"),
             )
             for i in range(runs):
@@ -130,6 +160,45 @@ class Incident:
                                  "workspace_path": str(self.prior / ".worktrees" / "t_root0001")}),
                      int(time.time()) - 200),
                 )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def write_board_default_workdir(self, workdir) -> None:
+        """Set the board's ``default_workdir``, at the KERNEL's path (so the plugin
+        is never confirmed by its own idea of where board.json lives)."""
+        from hermes_cli import kanban_db as kb
+
+        meta = kb.board_metadata_path("default")
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        meta.write_text(json.dumps({"slug": "default", "default_workdir": str(workdir)}),
+                        encoding="utf-8")
+
+    def add_event(self, kind: str, payload: dict) -> None:
+        """Append a board event (e.g. an operator's path change)."""
+        import sqlite3
+
+        conn = sqlite3.connect(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?,?,?,?)",
+                (TASK, kind, json.dumps(payload), int(time.time()) - 100),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def del_runs(self, n: int = 1) -> None:
+        """Drop the newest ``n`` runs, to re-create a first-provision shape."""
+        import sqlite3
+
+        conn = sqlite3.connect(self.db)
+        try:
+            conn.execute(
+                "DELETE FROM task_runs WHERE rowid IN (SELECT rowid FROM task_runs "
+                "WHERE task_id = ? ORDER BY started_at DESC LIMIT ?)",
+                (TASK, int(n)),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -196,7 +265,8 @@ def test_plan_alone_changes_nothing(incident):
 # AC1 + AC2
 # --------------------------------------------------------------------------
 
-def test_retry_worktree_keeps_the_prior_commits(incident):
+def test_ac1_retry_keeps_the_prior_commits_on_its_branch(incident):
+    """Plugin AC1 — a retry keeps the prior run's commits on its branch."""
     incident.write_board()
 
     verdict = plugin.carry_over(TASK, "default", db_path=incident.db, env={})
@@ -211,10 +281,28 @@ def test_retry_worktree_keeps_the_prior_commits(incident):
     assert "feat: add weekly retrospective digest" in subjects
     assert "test: fix weekly digest import path" in subjects
     assert subjects[0] == "test: fix weekly digest import path"
-    # AC2: the worker can read the implementation, not just the log.
+    assert _git(incident.target_ws, "rev-parse", "HEAD").stdout.strip() == incident.prior_head
+
+
+def test_ac2_worker_can_read_and_continue_the_carried_work(incident):
+    """Plugin AC2 — the worker can ``git log`` them, READ the implementation and
+    continue on top of it (not merely see a history it cannot use)."""
+    incident.write_board()
+    plugin.carry_over(TASK, "default", db_path=incident.db, env={})
+    incident.provision()
+
+    # read it: the files are on disk, not only in the log
     assert (incident.target_ws / "digest.py").read_text(encoding="utf-8") == "def weekly():\n    return []\n"
     assert (incident.target_ws / "test_digest.py").exists()
-    assert _git(incident.target_ws, "rev-parse", "HEAD").stdout.strip() == incident.prior_head
+
+    # continue it: a new commit lands ON TOP of the carried head
+    head = _commit(incident.target_ws, "digest_extra.py", "VALUE = 1\n",
+                   "feat: continue the weekly digest")
+    subjects = incident.log_subjects(incident.target_ws)
+    assert subjects[0] == "feat: continue the weekly digest"
+    assert subjects[-1] == "init"
+    assert head != incident.prior_head
+    assert _git(incident.target_ws, "rev-parse", "HEAD~1").stdout.strip() == incident.prior_head
 
 
 def test_carryover_is_recorded_on_the_board(incident):
@@ -272,7 +360,8 @@ def test_origin_is_used_when_the_prior_clone_is_gone(incident):
 # AC3 — regression: first provision is untouched
 # --------------------------------------------------------------------------
 
-def test_first_provision_still_creates_from_base(incident):
+def test_ac3_first_provision_still_creates_from_base(incident):
+    """Plugin AC3 — regression: a first provision is untouched."""
     incident.write_board(runs=1, anchor=False)
 
     verdict = plugin.plan(TASK, "default", db_path=incident.db, env={})
@@ -479,3 +568,224 @@ def test_manifest_is_a_bundled_backend():
     assert manifest["name"] == "kanban-worktree-carryover"
     assert manifest["kind"] == "backend"      # auto-loads; see the test above
     assert manifest["provides_hooks"] == [HOOK]
+
+
+# --------------------------------------------------------------------------
+# t_2a901db6 AC1 — the guard must not be inert in a profile-owned dispatcher
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("shape", ["root-home", "profile-home", "custom-root",
+                                   "custom-profile-root"])
+def test_profile_home_resolution_mirrors_the_kernel(tmp_path, monkeypatch, shape):
+    """The mirror is only worth having if it AGREES with the kernel it mirrors.
+
+    ``kanban_home()`` is ``HERMES_KANBAN_HOME`` else ``get_default_hermes_root()``,
+    so the plugin must never invent a second opinion; it may not import
+    ``hermes_cli``, so the reference is compared here instead."""
+    native = Path.home() / ".hermes"
+    if shape == "root-home":
+        home = tmp_path / "root-home"
+    elif shape == "profile-home":
+        home = native / "profiles" / "brain"          # under the native home
+    elif shape == "custom-root":
+        home = tmp_path / "docker" / "hermes"         # custom root, no profile segment
+    else:
+        home = tmp_path / "docker" / "profiles" / "other"
+    home.mkdir(parents=True, exist_ok=True)
+
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert plugin._kanban_home() == Path(kb.kanban_home()), shape
+
+    # HERMES_KANBAN_HOME still wins outright, exactly as it does in the kernel.
+    pin = tmp_path / "pinned-kanban-home"
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(pin))
+    assert plugin._kanban_home() == Path(kb.kanban_home()) == pin
+
+
+def test_profile_home_resolves_to_the_shared_board(incident, tmp_path, monkeypatch):
+    """Card AC1 — a profile-owned dispatcher must still FIND the board.
+
+    ``HERMES_HOME=<root>/profiles/<name>`` is how a profile gateway runs, and the
+    board is shared across profiles by design: the kernel resolves back to
+    ``<root>``. Returning ``HERMES_HOME`` verbatim made this plugin silently
+    inert in exactly those dispatchers — ``brain``, ``switch`` and ``axel`` have
+    each held the machine-global dispatcher lease, and non-root ownership is
+    supported on purpose (``_should_seize_dispatcher``)."""
+    root = tmp_path / "hermes-root"
+    (root / "profiles" / "brain").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "brain"))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+
+    incident.db = root / "kanban.db"          # where the kernel keeps the default board
+    incident.write_board()
+
+    from hermes_cli import kanban_db as kb
+
+    assert Path(kb.kanban_db_path("default")) == root / "kanban.db"   # the reference
+    assert plugin._kanban_home() == root                              # the mirror
+    assert plugin._find_db(TASK, "default") == root / "kanban.db"
+
+    verdict = plugin.plan(TASK, "default", env={})     # no db_path: it must discover
+    assert verdict["reason"] != "no board db holds this task"
+    assert verdict["action"] == "carry", verdict
+    assert Path(verdict["target_repo"]) == incident.target
+
+    carried = plugin.carry_over(TASK, "default", env={})
+    assert carried["action"] == "carried", carried
+    assert _git(incident.target, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip() == incident.prior_head
+
+
+# --------------------------------------------------------------------------
+# t_2a901db6 AC2 — the remote candidate must not go to the network
+# --------------------------------------------------------------------------
+
+def test_remote_candidate_never_touches_the_network(incident, tmp_path, monkeypatch):
+    """Card AC2 — the ``remote:<name>`` path branches from the local tracking ref.
+
+    ``plan()`` only offers ``remote:<name>`` when ``refs/remotes/<remote>/<branch>``
+    is already local, so the objects are in the target repo already. Fetching
+    first is pure latency on the one path that must stay fast: the hook runs
+    inline under the machine-global dispatch lock (``kanban_db_dispatch``), and
+    MAX_SOURCES x GIT_TIMEOUT was up to 80 s of stall on a dispatch tick."""
+    incident.write_board()
+    _git(incident.prior, "push", "origin", BRANCH)
+    _git(incident.target, "fetch", "origin")
+    shutil.rmtree(incident.prior)               # only the remote copy survives
+    # Dead remote: any fetch of it must fail. A test that passes by fetching it
+    # would be a test of the network, not of the plugin.
+    _git(incident.target, "remote", "set-url", "origin", str(tmp_path / "dead-remote"))
+
+    fetches = []
+    real_git = plugin._git
+
+    def spy(cwd, *args, timeout=plugin.GIT_TIMEOUT):
+        if args and args[0] == "fetch":
+            fetches.append((str(cwd), tuple(args)))
+        return real_git(cwd, *args, timeout=timeout)
+
+    monkeypatch.setattr(plugin, "_git", spy)
+
+    verdict = plugin.carry_over(TASK, "default", db_path=incident.db, env={})
+    assert fetches == [], f"the remote path went to the network: {fetches}"
+    assert verdict["action"] == "carried", verdict
+    assert verdict["source"] == "remote:origin"
+    assert verdict["head"] == incident.prior_head
+
+    incident.provision()
+    assert (incident.target_ws / "digest.py").exists()
+    assert "feat: add weekly retrospective digest" in incident.log_subjects(incident.target_ws)
+
+
+# --------------------------------------------------------------------------
+# t_2a901db6 AC3 — the incident's OWN shape: workspace_path NULL + board default
+# --------------------------------------------------------------------------
+
+def test_cleared_anchor_falls_back_to_board_default_workdir(incident):
+    """Card AC3 — the card's ``workspace_path`` was CLEARED (the standard "point
+    it back at the canonical clone" remedy) and the board's ``default_workdir``
+    is what dispatch then resolves. No test reached that shape: the shipped one
+    returns at ``runs < 2`` before the anchor is even read."""
+    incident.write_board(workspace_path=None)                 # SQL NULL, not the target
+    incident.write_board_default_workdir(incident.target)
+
+    from hermes_cli import kanban_db as kb
+
+    # The anchor dispatch will use is the board's, and the kernel agrees.
+    assert kb.read_board_metadata("default")["default_workdir"] == str(incident.target)
+
+    verdict = plugin.plan(TASK, "default", db_path=incident.db, env={})
+    assert verdict["action"] == "carry", verdict
+    assert Path(verdict["target_repo"]) == incident.target
+    assert verdict["candidates"][0]["source"] == str(incident.prior / ".worktrees" / "t_root0001")
+
+    carried = plugin.carry_over(TASK, "default", db_path=incident.db, env={})
+    assert carried["action"] == "carried", carried
+    assert carried["head"] == incident.prior_head
+
+    # The kernel then materialises the worktree from the board default, and the
+    # prior commits and files arrive with it.
+    worktree, branch = incident.provision()
+    assert Path(worktree) == incident.target_ws
+    assert branch == BRANCH
+    assert incident.log_subjects(incident.target_ws)[0] == "test: fix weekly digest import path"
+    assert (incident.target_ws / "digest.py").read_text(encoding="utf-8") == "def weekly():\n    return []\n"
+    assert _git(incident.target_ws, "rev-parse", "HEAD").stdout.strip() == incident.prior_head
+
+
+# --------------------------------------------------------------------------
+# t_2a901db6 AC5 — the root dispatcher path is unchanged
+# --------------------------------------------------------------------------
+
+def test_root_home_path_is_unchanged(incident, tmp_path, monkeypatch):
+    """Card AC5 — ``HERMES_HOME=<root>`` (the root dispatcher) still resolves to
+    itself, and the two live calibrations still return the same verdicts:
+    ``t_17ee37d5`` -> branch present, first provisions -> one run."""
+    root = tmp_path / "hermes-root"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    incident.db = root / "kanban.db"
+    incident.write_board()
+
+    from hermes_cli import kanban_db as kb
+
+    assert Path(kb.kanban_db_path("default")) == root / "kanban.db"
+    assert plugin._kanban_home() == root
+
+    # live calibration (t_17ee37d5): the branch is already in the target repo.
+    _git(incident.target, "branch", BRANCH)
+    verdict = plugin.plan(TASK, "default", env={})
+    assert verdict["action"] == "noop"
+    assert verdict["reason"] == "branch already present in target repo"
+
+    # live calibration (first provisions): a single run, so nothing to carry.
+    _git(incident.target, "branch", "-D", BRANCH)
+    incident.del_runs(1)
+    verdict = plugin.plan(TASK, "default", env={})
+    assert verdict["action"] == "noop"
+    assert verdict["reason"] == "first provision"
+
+
+# --------------------------------------------------------------------------
+# the remaining unreached branches
+# --------------------------------------------------------------------------
+
+def test_retry_with_no_anchor_at_all_is_a_noop(incident):
+    """Neither a card path NOR a board default: fail open, quietly. Guessing a
+    repo here is the failure mode the anchor check exists to prevent."""
+    incident.write_board(anchor=False, workspace_path=None)
+
+    verdict = plugin.plan(TASK, "default", db_path=incident.db, env={})
+    assert verdict["action"] == "noop"
+    assert verdict["reason"] == "no anchor (no workspace_path, no board default_workdir)"
+
+
+def test_anchor_outside_a_git_repo_is_a_noop(incident, tmp_path):
+    stray = tmp_path / "not-a-repo" / "dir"
+    stray.mkdir(parents=True)
+    incident.write_board(workspace_path=str(stray))
+
+    verdict = plugin.plan(TASK, "default", db_path=incident.db, env={})
+    assert verdict["action"] == "noop"
+    assert verdict["reason"] == "anchor is not inside a git repo"
+
+
+@pytest.mark.parametrize("key", ["previous_workspace_path", "old_workspace_path"])
+def test_a_recorded_previous_workspace_path_is_used_as_a_source(incident, key):
+    """The board can record where a card ran BEFORE its path was re-pointed, and
+    that path is where the branch is. Both keys are candidate SOURCES (newest
+    first) — they are not the target anchor, so the card still needs its own
+    ``workspace_path`` or a board ``default_workdir``."""
+    incident.write_board(anchor=False, workspace_path=str(incident.target))
+    incident.add_event("workspace_update", {key: str(incident.prior / ".worktrees" / "t_root0001")})
+
+    verdict = plugin.carry_over(TASK, "default", db_path=incident.db, env={})
+    assert verdict["action"] == "carried", verdict
+    assert verdict["source"] == str(incident.prior / ".worktrees" / "t_root0001")
+
+    incident.provision()
+    assert (incident.target_ws / "digest.py").exists()
+    assert "feat: add weekly retrospective digest" in incident.log_subjects(incident.target_ws)

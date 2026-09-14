@@ -13,7 +13,9 @@ Contract used from upstream (read-only, nothing imported from ``hermes_cli``):
   ``default`` board, ``<root>/kanban/boards/<slug>/kanban.db`` for a named one,
   metadata at ``<root>/kanban/boards/<slug>/board.json`` (``default_workdir``),
   ``<root>/kanban/current`` holding the active slug (absent = ``default``) —
-  ``kanban_home()`` is ``$HERMES_KANBAN_HOME`` else ``~/.hermes``.
+  ``kanban_home()`` is ``$HERMES_KANBAN_HOME`` else the ROOT home, i.e. a
+  profile's ``HERMES_HOME=<root>/profiles/<name>`` resolves BACK to ``<root>``
+  because the board is shared across profiles by design.
 
 Everything here is best-effort and fails open: a hook that raises or guesses
 strangles the board, which is worse than the defect it prevents.
@@ -25,6 +27,7 @@ import logging
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -48,14 +51,41 @@ GIT_TIMEOUT = 20
 # board / db discovery (stdlib mirror of kanban_db's layout)
 # --------------------------------------------------------------------------
 
+def _native_hermes_home() -> Path:
+    """Platform-default Hermes home — mirror of ``hermes_constants`` (no import)."""
+    if sys.platform == "win32":
+        local = (os.environ.get("LOCALAPPDATA") or "").strip()
+        base = Path(local) if local else Path.home() / "AppData" / "Local"
+        return base / "hermes"
+    return Path.home() / ".hermes"
+
+
 def _kanban_home() -> Path:
+    """``HERMES_KANBAN_HOME`` else the ROOT home — mirror of ``kanban_db.kanban_home()``.
+
+    The board is shared across profiles BY DESIGN, so the kernel resolves
+    ``HERMES_HOME=<root>/profiles/<name>`` back to ``<root>`` through
+    ``get_default_hermes_root()``. Returning ``HERMES_HOME`` verbatim made this
+    plugin silently inert in every profile-owned dispatcher: it looked for the
+    board inside the profile directory, found none, and reported "no board db
+    holds this task" for a board it had never looked at. ``brain``, ``switch``
+    and ``axel`` have each held the machine-global dispatcher lease, and
+    non-root ownership is supported on purpose (``_should_seize_dispatcher``).
+    """
     override = (os.environ.get("HERMES_KANBAN_HOME") or "").strip()
     if override:
         return Path(override).expanduser()
-    home = (os.environ.get("HERMES_HOME") or "").strip()
-    if home:
-        return Path(home).expanduser()
-    return Path.home() / ".hermes"
+    env_home = (os.environ.get("HERMES_HOME") or "").strip()
+    native = _native_hermes_home()
+    if not env_home:
+        return native
+    env_path = Path(env_home).expanduser()
+    try:
+        env_path.resolve(strict=False).relative_to(native.resolve(strict=False))
+    except (ValueError, OSError):
+        # Docker / custom root: <root>/profiles/<name> -> <root>, else as given.
+        return env_path.parent.parent if env_path.parent.name == "profiles" else env_path
+    return native
 
 
 def _slug_or_default(board: Optional[str]) -> str:
@@ -330,7 +360,8 @@ def plan(task_id: str, board: Optional[str] = None, *, db_path: Optional[Path] =
             break
         # Only a branch ALREADY fetched locally is a candidate: the dispatcher
         # tick must not go to the network on every retry, and a remote-tracking
-        # ref we already hold is proof the work reached the remote.
+        # ref we already hold is proof the work reached the remote. Nothing
+        # fetches it later either — carries from here are ref-only, local (AC2).
         if not _git_out(target_repo, "rev-parse", "--verify", f"refs/remotes/{remote}/{branch}"):
             continue
         if not any(name == f"remote:{remote}" for name, _ in candidates):
@@ -356,18 +387,18 @@ def _fetch(target_repo: Path, source: str, repo: Path, branch: str) -> bool:
     """
     ref = f"refs/heads/{branch}:refs/heads/{branch}"
     if source.startswith("remote:"):
+        # NO NETWORK HERE. ``plan()`` only offers ``remote:<name>`` when the
+        # tracking ref is already local — the objects are in this repo already —
+        # and this hook runs inline under the machine-global dispatch lock, where
+        # a fetch is up to GIT_TIMEOUT of stall per candidate for no gain. The
+        # branch is cut from the tracking ref we hold; a remote that has since
+        # moved is not our problem to solve on a dispatch tick (t_2a901db6).
         remote = source.split(":", 1)[1]
-        res = _git(target_repo, "fetch", "--no-tags", remote, ref)
-        if res is not None and res.returncode == 0 and _branch_exists(target_repo, branch):
-            return True
-        # Offline (or the remote pruned it): the remote-tracking ref we already
-        # hold carries the same objects, so branch from it without the network.
         tracking = f"refs/remotes/{remote}/{branch}"
-        if _git_out(target_repo, "rev-parse", "--verify", tracking):
-            made = _git(target_repo, "branch", branch, tracking)
-            if made is not None and made.returncode == 0:
-                return True
-        return False
+        if not _git_out(target_repo, "rev-parse", "--verify", tracking):
+            return False
+        made = _git(target_repo, "branch", branch, tracking)
+        return made is not None and made.returncode == 0
     res = _git(target_repo, "fetch", "--no-tags", str(repo), ref)
     if res is None or res.returncode != 0:
         logger.debug(
