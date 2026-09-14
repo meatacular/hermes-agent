@@ -260,8 +260,32 @@
       const empty = { calls: 0, billed: 0, ma: 0, hosts: [] };
       const tot = Object.values(byP).reduce((a, u) => ({ calls: a.calls + u.calls, billed: a.billed + u.billed, ma: a.ma + u.ma }), { calls: 0, billed: 0, ma: 0 });
       const models = doc.models || {};
+      const T = usage && usage.totals || {};
       const k = (v, f) => usage ? f(v) : "\u2014";
-      return /* @__PURE__ */ h(Fragment, null, /* @__PURE__ */ h("div", { className: "fm-stats" }, /* @__PURE__ */ h(Stat2, { label: `Calls \xB7 ${periodShort(win)}`, value: k(tot.calls, num), sub: lastLabel(win).toLowerCase() }), /* @__PURE__ */ h(Stat2, { label: `Billed \xB7 ${periodShort(win)}`, value: k(tot.billed, (v) => money(v, 2)), sub: "OpenRouter, real invoices", tone: "money" }), /* @__PURE__ */ h(Stat2, { label: "ModelArk subscription", value: k(tot.ma, (v) => num(v) + " calls"), sub: tot.calls ? Math.round(100 * tot.ma / tot.calls) + "% of all calls \xB7 $0" : "$0", tone: "sub" }), /* @__PURE__ */ h(Stat2, { label: "Registry", value: Object.keys(models).length + " models", sub: Object.values(models).filter((m) => m.provider === "modelark").length + " subscription \xB7 " + Object.values(models).filter((m) => m.provider === "openrouter").length + " OpenRouter" }), /* @__PURE__ */ h(Stat2, { label: "Sync", value: Object.keys(state.drift || {}).length ? Object.keys(state.drift).length + " drifted" : "all 9 in sync", tone: Object.keys(state.drift || {}).length ? "warn" : "ok", sub: "revision " + state.revision })), /* @__PURE__ */ h("div", { className: "fm-grid" }, state.profiles.map((p) => /* @__PURE__ */ h(
+      return /* @__PURE__ */ h(Fragment, null, /* @__PURE__ */ h("div", { className: "fm-stats" }, /* @__PURE__ */ h(Stat2, { label: `Calls \xB7 ${periodShort(win)}`, value: k(tot.calls, num), sub: lastLabel(win).toLowerCase() }), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: `Tokens \xB7 ${periodShort(win)}`,
+          value: k(T.tokens, tok),
+          sub: T.tokens ? `${tok(T.input)} in \xB7 ${tok(T.output)} out \xB7 ${tok(T.cache_read)} cached` : "\u2014"
+        }
+      ), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: "Cache hit",
+          value: T.cache_hit_pct == null ? "\u2014" : T.cache_hit_pct + "%",
+          sub: "of prompt tokens served from cache",
+          tone: "ok"
+        }
+      ), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: `Cost \xB7 ${periodShort(win)}`,
+          value: k(tot.billed, (v) => money(v, 2)),
+          sub: costSub(T),
+          tone: "money"
+        }
+      ), /* @__PURE__ */ h(Stat2, { label: "ModelArk subscription", value: k(tot.ma, (v) => num(v) + " calls"), sub: tot.calls ? Math.round(100 * tot.ma / tot.calls) + "% of all calls \xB7 $0" : "$0", tone: "sub" }), /* @__PURE__ */ h(Stat2, { label: "Registry", value: Object.keys(models).length + " models", sub: Object.values(models).filter((m) => m.provider === "modelark").length + " subscription \xB7 " + Object.values(models).filter((m) => m.provider === "openrouter").length + " OpenRouter" }), /* @__PURE__ */ h(Stat2, { label: "Sync", value: Object.keys(state.drift || {}).length ? Object.keys(state.drift).length + " drifted" : "all 9 in sync", tone: Object.keys(state.drift || {}).length ? "warn" : "ok", sub: "revision " + state.revision })), /* @__PURE__ */ h("div", { className: "fm-grid" }, state.profiles.map((p) => /* @__PURE__ */ h(
         AgentCard2,
         {
           key: p,
@@ -502,7 +526,7 @@
       const bm = usage && usage.by_model || {};
       const spark = usage && usage.series ? usage.series.map((_, i) => ids.reduce((a, id) => a + (((bm[id] || {}).calls || [])[i] || 0), 0)) : null;
       const ce = m.cap_equivalent || {};
-      return /* @__PURE__ */ h("div", { className: "fm-model" }, /* @__PURE__ */ h("header", { className: "fm-model-head" }, /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("h2", null, m.short || alias, " ", /* @__PURE__ */ h("span", { className: cls2("fm-prov", "fm-prov--" + m.provider) }, m.provider === "modelark" ? "ModelArk \xB7 subscription" : "OpenRouter \xB7 metered")), /* @__PURE__ */ h("code", { className: "fm-code" }, m.id)), /* @__PURE__ */ h("div", { className: "fm-row" }, m.vision ? /* @__PURE__ */ h(Badge2, null, "vision") : /* @__PURE__ */ h(Badge2, { tone: "dim" }, "text-only"), m.tools !== false ? /* @__PURE__ */ h(Badge2, null, "tools") : /* @__PURE__ */ h(Badge2, { tone: "warn" }, "no tools"), m.context ? /* @__PURE__ */ h(Badge2, null, num(m.context), " ctx") : null, /* @__PURE__ */ h(Badge2, null, m.vendor))), m.notes ? /* @__PURE__ */ h("p", { className: "fm-notes" }, m.notes) : null, /* @__PURE__ */ h("div", { className: "fm-two" }, /* @__PURE__ */ h(Section2, { title: "Settings" }, /* @__PURE__ */ h("label", { className: "fm-field" }, /* @__PURE__ */ h("span", null, "Display name"), /* @__PURE__ */ h("input", { value: m.short || "", onChange: (e) => set((x) => {
+      return /* @__PURE__ */ h("div", { className: "fm-model" }, /* @__PURE__ */ h("header", { className: "fm-model-head" }, /* @__PURE__ */ h("div", null, /* @__PURE__ */ h("h2", null, m.short || alias, " ", /* @__PURE__ */ h("span", { className: cls2("fm-prov", "fm-prov--" + m.provider) }, PROV_LABEL[m.provider] || m.provider + " \xB7 metered")), /* @__PURE__ */ h("code", { className: "fm-code" }, m.id)), /* @__PURE__ */ h("div", { className: "fm-row" }, m.vision ? /* @__PURE__ */ h(Badge2, null, "vision") : /* @__PURE__ */ h(Badge2, { tone: "dim" }, "text-only"), m.tools !== false ? /* @__PURE__ */ h(Badge2, null, "tools") : /* @__PURE__ */ h(Badge2, { tone: "warn" }, "no tools"), m.context ? /* @__PURE__ */ h(Badge2, null, num(m.context), " ctx") : null, /* @__PURE__ */ h(Badge2, null, m.vendor))), m.notes ? /* @__PURE__ */ h("p", { className: "fm-notes" }, m.notes) : null, /* @__PURE__ */ h("div", { className: "fm-two" }, /* @__PURE__ */ h(Section2, { title: "Settings" }, /* @__PURE__ */ h("label", { className: "fm-field" }, /* @__PURE__ */ h("span", null, "Display name"), /* @__PURE__ */ h("input", { value: m.short || "", onChange: (e) => set((x) => {
         x.short = e.target.value;
       }) })), /* @__PURE__ */ h("label", { className: "fm-field" }, /* @__PURE__ */ h("span", null, "Reasoning pin"), /* @__PURE__ */ h("select", { value: m.reasoning || "", onChange: (e) => set((x) => {
         if (e.target.value) x.reasoning = e.target.value;
@@ -602,7 +626,7 @@
         const m = draft.models[a];
         return /* @__PURE__ */ h("button", { key: a, role: "tab", "aria-selected": a === cur, className: cls2("fm-model-item", a === cur && "is-active"), onClick: () => setSel(a) }, /* @__PURE__ */ h("span", { className: cls2("fm-pill-dot", "fm-dot--" + m.provider) }), /* @__PURE__ */ h("span", { className: "fm-model-item-name" }, m.short || a), /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, usedBy2(draft, a).length, " slots"));
       })), /* @__PURE__ */ h("details", { className: "fm-model-list-foot" }, /* @__PURE__ */ h("summary", null, "+ Add a model"), /* @__PURE__ */ h(AddModel2, { draft, setDraft, onAdded: setSel }))), /* @__PURE__ */ h("div", { className: "fm-model-main" }, cur ? /* @__PURE__ */ h(ModelDetail2, { key: cur, draft, alias: cur, setDraft, usage, win }) : null));
-    }, CostsView2 = function({ doc, usage, win, width }) {
+    }, CostsView2 = function({ doc, usage, win, width, balances }) {
       if (!usage) return /* @__PURE__ */ h("div", { className: "fm-muted" }, "Loading usage\u2026");
       const rows = usage.rows || [];
       const byAgent = {};
@@ -610,6 +634,7 @@
         (byAgent[r.profile] = byAgent[r.profile] || []).push(r);
       });
       const tot = rows.reduce((a, r) => ({ billed: a.billed + r.billed_usd, calls: a.calls + r.calls, ma: a.ma + (r.modelark ? r.calls : 0), cap: a.cap + r.cap_equivalent_usd, tin: a.tin + r.input, tout: a.tout + r.output }), { billed: 0, calls: 0, ma: 0, cap: 0, tin: 0, tout: 0 });
+      const T = usage && usage.totals || {};
       const idToShort = {};
       Object.values(doc.models || {}).forEach((m) => {
         idToShort[m.id] = m.short;
@@ -617,7 +642,30 @@
           idToShort[s] = m.short;
         });
       });
-      return /* @__PURE__ */ h(Fragment, null, /* @__PURE__ */ h("div", { className: "fm-stats" }, /* @__PURE__ */ h(Stat2, { label: `Billed \xB7 ${periodShort(win)}`, value: money(tot.billed, 2), tone: "money", sub: "OpenRouter \u2014 what actually gets invoiced" }), /* @__PURE__ */ h(Stat2, { label: "ModelArk subscription", value: num(tot.ma) + " calls", tone: "sub", sub: "$0 \xB7 cap-equivalent " + money(tot.cap, 2) }), /* @__PURE__ */ h(Stat2, { label: "All calls", value: num(tot.calls), sub: num(tot.tin) + " in \xB7 " + num(tot.tout) + " out tokens" }), /* @__PURE__ */ h(Stat2, { label: "Subscription share", value: tot.calls ? Math.round(100 * tot.ma / tot.calls) + "%" : "\u2014", sub: "of calls served on the flat plan" })), /* @__PURE__ */ h(Section2, { title: "Over time", right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, bucketName(usage.bucket), " bars \xB7 tap or hover a bar") }, /* @__PURE__ */ h(TimeChart2, { usage, width }), /* @__PURE__ */ h("p", { className: "fm-muted fm-small fm-tc-foot" }, "From all nine ledgers. Each session's usage is spread evenly between its first and last call, so short windows are close estimates. Faded bars are part-way through.")), /* @__PURE__ */ h("div", { className: "fm-two" }, /* @__PURE__ */ h(Section2, { title: `Spend by agent \xB7 ${periodShort(win)}`, right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, "bar = billed $ \xB7 teal = subscription calls") }, /* @__PURE__ */ h(BarList2, { rows: Object.entries(byAgent).map(([p, rs]) => ({
+      return /* @__PURE__ */ h(Fragment, null, /* @__PURE__ */ h("div", { className: "fm-stats" }, /* @__PURE__ */ h(Stat2, { label: `Cost \xB7 ${periodShort(win)}`, value: money(tot.billed, 2), tone: "money", sub: costSub(T) }), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: `Tokens \xB7 ${periodShort(win)}`,
+          value: tok(T.tokens),
+          sub: `${tok(T.input)} in \xB7 ${tok(T.output)} out \xB7 ${tok(T.cache_read)} cached`
+        }
+      ), /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: "Cache hit",
+          value: T.cache_hit_pct == null ? "\u2014" : T.cache_hit_pct + "%",
+          tone: "ok",
+          sub: `${tok(T.cache_read)} of ${tok((T.input || 0) + (T.cache_read || 0))} prompt tokens`
+        }
+      ), /* @__PURE__ */ h(Stat2, { label: "ModelArk subscription", value: num(tot.ma) + " calls", tone: "sub", sub: "$0 \xB7 cap-equivalent " + money(tot.cap, 2) }), /* @__PURE__ */ h(Stat2, { label: "All calls", value: num(tot.calls), sub: payerSub(T) }), balances && balances.deepseek ? /* @__PURE__ */ h(
+        Stat2,
+        {
+          label: "DeepSeek direct",
+          tone: "ds",
+          value: balances.deepseek.balance_usd != null ? money(balances.deepseek.balance_usd, 2) + " left" : "\u2014",
+          sub: "metered \xB7 " + (T.by_payer && T.by_payer.deepseek ? money(T.by_payer.deepseek.billed_usd, 4) + " estimated this window" : "no calls this window")
+        }
+      ) : null), /* @__PURE__ */ h(Section2, { title: "Over time", right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, bucketName(usage.bucket), " bars \xB7 tap or hover a bar") }, /* @__PURE__ */ h(TimeChart2, { usage, width }), /* @__PURE__ */ h("p", { className: "fm-muted fm-small fm-tc-foot" }, "From all nine ledgers. Each session's usage is spread evenly between its first and last call, so short windows are close estimates. Faded bars are part-way through.")), /* @__PURE__ */ h("div", { className: "fm-two" }, /* @__PURE__ */ h(Section2, { title: `Spend by agent \xB7 ${periodShort(win)}`, right: /* @__PURE__ */ h("span", { className: "fm-muted fm-small" }, "bar = billed $ \xB7 teal = subscription calls") }, /* @__PURE__ */ h(BarList2, { rows: Object.entries(byAgent).map(([p, rs]) => ({
         label: (doc.agents[p] || {}).name || p,
         billed: rs.reduce((a, r) => a + r.billed_usd, 0),
         calls: rs.reduce((a, r) => a + r.calls, 0),
@@ -629,7 +677,7 @@
         a.calls += r.calls;
         if (r.modelark) a.ma += r.calls;
         return acc;
-      }, {})) }))), /* @__PURE__ */ h(Section2, { title: `By agent, model and host \xB7 ${periodShort(win)}` }, /* @__PURE__ */ h("div", { className: "fm-table-wrap" }, /* @__PURE__ */ h("table", { className: "fm-table" }, /* @__PURE__ */ h("thead", null, /* @__PURE__ */ h("tr", null, /* @__PURE__ */ h("th", null, "Agent"), /* @__PURE__ */ h("th", null, "Model"), /* @__PURE__ */ h("th", null, "Served by"), /* @__PURE__ */ h("th", null, "Where"), /* @__PURE__ */ h("th", { className: "r" }, "Calls"), /* @__PURE__ */ h("th", { className: "r" }, "In"), /* @__PURE__ */ h("th", { className: "r" }, "Out"), /* @__PURE__ */ h("th", { className: "r" }, "Cache read"), /* @__PURE__ */ h("th", { className: "r" }, "Billed"), /* @__PURE__ */ h("th", { className: "r" }, "Cap-equiv."))), /* @__PURE__ */ h("tbody", null, Object.entries(byAgent).map(([p, rs]) => rs.map((r, i) => /* @__PURE__ */ h("tr", { key: p + i }, /* @__PURE__ */ h("td", null, i === 0 ? /* @__PURE__ */ h("b", null, (doc.agents[p] || {}).name || p) : null), /* @__PURE__ */ h("td", null, idToShort[r.model] || /* @__PURE__ */ h("code", { className: "fm-code" }, r.model)), /* @__PURE__ */ h("td", null, r.modelark ? /* @__PURE__ */ h("span", { className: "fm-prov fm-prov--modelark" }, "modelark subscription") : r.host || "\u2014"), /* @__PURE__ */ h("td", { className: "fm-muted" }, r.task === "main" ? "main" : TASK_LABEL[r.task] || r.task), /* @__PURE__ */ h("td", { className: "r" }, num(r.calls)), /* @__PURE__ */ h("td", { className: "r" }, num(r.input)), /* @__PURE__ */ h("td", { className: "r" }, num(r.output)), /* @__PURE__ */ h("td", { className: "r" }, num(r.cache_read)), /* @__PURE__ */ h("td", { className: "r" }, r.modelark ? "$0" : money(r.billed_usd)), /* @__PURE__ */ h("td", { className: "r fm-muted" }, r.modelark ? money(r.cap_equivalent_usd) : "")))))))));
+      }, {})) }))), /* @__PURE__ */ h(Section2, { title: `By agent, model and host \xB7 ${periodShort(win)}` }, /* @__PURE__ */ h("div", { className: "fm-table-wrap" }, /* @__PURE__ */ h("table", { className: "fm-table" }, /* @__PURE__ */ h("thead", null, /* @__PURE__ */ h("tr", null, /* @__PURE__ */ h("th", null, "Agent"), /* @__PURE__ */ h("th", null, "Model"), /* @__PURE__ */ h("th", null, "Served by"), /* @__PURE__ */ h("th", null, "Where"), /* @__PURE__ */ h("th", { className: "r" }, "Calls"), /* @__PURE__ */ h("th", { className: "r" }, "In"), /* @__PURE__ */ h("th", { className: "r" }, "Out"), /* @__PURE__ */ h("th", { className: "r" }, "Cache read"), /* @__PURE__ */ h("th", { className: "r" }, "Hit %"), /* @__PURE__ */ h("th", { className: "r" }, "Cost"), /* @__PURE__ */ h("th", { className: "r" }, "Cap-equiv."))), /* @__PURE__ */ h("tbody", null, Object.entries(byAgent).map(([p, rs]) => rs.map((r, i) => /* @__PURE__ */ h("tr", { key: p + i }, /* @__PURE__ */ h("td", null, i === 0 ? /* @__PURE__ */ h("b", null, (doc.agents[p] || {}).name || p) : null), /* @__PURE__ */ h("td", null, idToShort[r.model] || /* @__PURE__ */ h("code", { className: "fm-code" }, r.model)), /* @__PURE__ */ h("td", null, r.modelark ? /* @__PURE__ */ h("span", { className: "fm-prov fm-prov--modelark" }, "modelark subscription") : r.host || (r.payer && r.payer !== "openrouter" ? /* @__PURE__ */ h("span", { className: cls2("fm-prov", "fm-prov--" + r.payer) }, r.payer, " direct") : "\u2014")), /* @__PURE__ */ h("td", { className: "fm-muted" }, r.task === "main" ? "main" : TASK_LABEL[r.task] || r.task), /* @__PURE__ */ h("td", { className: "r" }, num(r.calls)), /* @__PURE__ */ h("td", { className: "r" }, num(r.input)), /* @__PURE__ */ h("td", { className: "r" }, num(r.output)), /* @__PURE__ */ h("td", { className: "r" }, num(r.cache_read)), /* @__PURE__ */ h("td", { className: "r fm-muted" }, r.cache_hit_pct == null ? "\u2014" : r.cache_hit_pct + "%"), /* @__PURE__ */ h("td", { className: "r" }, r.modelark ? "$0" : /* @__PURE__ */ h(Fragment, null, money(r.billed_usd), r.invoiced === false ? /* @__PURE__ */ h("span", { className: "fm-tag--est", title: "metered, but the provider returns no per-call cost \u2014 Hermes estimates it from the published rate card" }, "est") : null)), /* @__PURE__ */ h("td", { className: "r fm-muted" }, r.modelark ? money(r.cap_equivalent_usd) : "")))))))));
     }, BarList2 = function({ rows }) {
       const sorted = rows.slice().sort((a, b) => b.billed - a.billed || b.calls - a.calls);
       const max = Math.max(1e-6, ...sorted.map((r) => r.billed));
@@ -842,7 +890,7 @@
       } }, "Refresh"))), /* @__PURE__ */ h("nav", { className: "fm-tabs" }, TABS.map(([k, l]) => /* @__PURE__ */ h("button", { key: k, className: cls2("fm-tab", tab === k && "is-active"), onClick: () => setTab(k) }, l))), movedUnder ? /* @__PURE__ */ h("div", { className: "fm-note fm-note--warn" }, "Someone applied a change while you were editing (now revision ", state.revision, "). Preview will refuse a stale edit \u2014 discard and redo it.") : null, tab === "fleet" || tab === "models" || tab === "costs" ? /* @__PURE__ */ h(PeriodBar2, { win, setWin, usage: shown, loading: uLoading, failed: uErr > 0 }) : null, /* @__PURE__ */ h("main", { className: cls2("fm-main", stale && "is-stale") }, tab === "fleet" ? /* @__PURE__ */ h(FleetView2, { state, doc, usage: shown, win: shown ? shown.window : win, onOpen: (p) => {
         setAgent(p);
         setTab("agent");
-      } }) : null, tab === "agent" ? /* @__PURE__ */ h(AgentView2, { state, draft, setDraft, p: agent, setP: setAgent }) : null, tab === "models" ? /* @__PURE__ */ h(ModelsView2, { draft, setDraft, usage: shown, win: shown ? shown.window : win, sel: modelSel, setSel: setModelSel }) : null, tab === "costs" ? /* @__PURE__ */ h(CostsView2, { doc, usage: shown, win: shown ? shown.window : win, width: chartW }) : null, tab === "decisions" ? /* @__PURE__ */ h(DecisionsView2, { state, draft, setDraft, onRevert: revert }) : null), dirty ? /* @__PURE__ */ h("div", { className: "fm-dock" }, /* @__PURE__ */ h("span", null, /* @__PURE__ */ h("b", null, "Unsaved changes"), " ", /* @__PURE__ */ h("span", { className: "fm-muted" }, "\u2014 nothing reaches the fleet until you apply")), /* @__PURE__ */ h("span", { className: "fm-row" }, /* @__PURE__ */ h("button", { className: "fm-btn", onClick: () => {
+      } }) : null, tab === "agent" ? /* @__PURE__ */ h(AgentView2, { state, draft, setDraft, p: agent, setP: setAgent }) : null, tab === "models" ? /* @__PURE__ */ h(ModelsView2, { draft, setDraft, usage: shown, win: shown ? shown.window : win, sel: modelSel, setSel: setModelSel }) : null, tab === "costs" ? /* @__PURE__ */ h(CostsView2, { doc, usage: shown, win: shown ? shown.window : win, width: chartW, balances: state.balances }) : null, tab === "decisions" ? /* @__PURE__ */ h(DecisionsView2, { state, draft, setDraft, onRevert: revert }) : null), dirty ? /* @__PURE__ */ h("div", { className: "fm-dock" }, /* @__PURE__ */ h("span", null, /* @__PURE__ */ h("b", null, "Unsaved changes"), " ", /* @__PURE__ */ h("span", { className: "fm-muted" }, "\u2014 nothing reaches the fleet until you apply")), /* @__PURE__ */ h("span", { className: "fm-row" }, /* @__PURE__ */ h("button", { className: "fm-btn", onClick: () => {
         setDraft(clone(state.doc));
         baseRef.current = clone(state.doc);
       } }, "Discard"), /* @__PURE__ */ h("button", { className: "fm-btn fm-btn--primary", disabled: busy, onClick: preview }, busy ? "Checking\u2026" : "Preview & apply"))) : null, plan ? /* @__PURE__ */ h(
@@ -880,6 +928,11 @@
       "approval",
       "flush_memories"
     ];
+    const PROV_LABEL = {
+      modelark: "ModelArk \xB7 subscription",
+      openrouter: "OpenRouter \xB7 metered",
+      deepseek: "DeepSeek direct \xB7 metered (estimated)"
+    };
     const REASONING = ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
     const SLOT_LABEL = { main: "Main loop", subagents: "Subagents", cron: "Cron jobs" };
     const TASK_LABEL = {
@@ -896,6 +949,25 @@
       flush_memories: "Memory flush"
     };
     const clone = (o) => JSON.parse(JSON.stringify(o));
+    const tok = (n) => {
+      const v = Number(n) || 0;
+      if (v >= 1e9) return (v / 1e9).toFixed(v < 1e10 ? 2 : 1) + "B";
+      if (v >= 1e6) return (v / 1e6).toFixed(v < 1e7 ? 1 : 0) + "M";
+      if (v >= 1e3) return Math.round(v / 1e3) + "k";
+      return String(v);
+    };
+    const costSub = (T) => {
+      if (!T) return "";
+      const parts = [];
+      if (T.invoiced_usd) parts.push(money(T.invoiced_usd, 2) + " invoiced");
+      if (T.estimated_usd) parts.push(money(T.estimated_usd, T.estimated_usd < 0.01 ? 4 : 2) + " estimated");
+      if (T.subscription_calls) parts.push("subscription $0");
+      return parts.join(" \xB7 ") || "no spend in this window";
+    };
+    const payerSub = (T) => {
+      const bp = T && T.by_payer || {};
+      return Object.keys(bp).sort().map((n) => `${num(bp[n].calls)} ${n}`).join(" \xB7 ");
+    };
     const chainOf = (spec) => spec == null ? [] : Array.isArray(spec) ? spec : spec.chain || [];
     const reasoningOf = (spec) => spec && !Array.isArray(spec) ? spec.reasoning || "" : "";
     const withChain = (spec, chain) => spec && !Array.isArray(spec) ? { ...spec, chain } : chain;

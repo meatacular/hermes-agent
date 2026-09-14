@@ -209,11 +209,13 @@ def _ledgers(root: Path):
 
 
 def _usage_rows(root: Path, since: float, now: float):
-    """(profile, model, host, base, task, calls, in, out, cache_read, cache_write, cost, source, first, last)."""
+    """(profile, model, host, base, task, billing_provider, calls, in, out, cache_read, cache_write,
+    cost, source, first, last)."""
     for prof, db in _ledgers(root):
         try:
             c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
             q = ("SELECT model, COALESCE(provider_name,''), COALESCE(billing_base_url,''), COALESCE(task,''), "
+                 "COALESCE(billing_provider,''), "
                  "COALESCE(api_call_count,0), COALESCE(input_tokens,0), COALESCE(output_tokens,0), "
                  "COALESCE(cache_read_tokens,0), COALESCE(cache_write_tokens,0), "
                  "CASE WHEN COALESCE(actual_cost_usd,0) > 0 THEN actual_cost_usd WHEN COALESCE(total_cost,0) > 0 THEN total_cost "
@@ -265,7 +267,7 @@ def usage(window: int = 7 * 86400, bucket: Optional[int] = None, tz: Optional[st
     def idx(t):
         return min(nb - 1, max(0, bisect.bisect_right(edges, t) - 1))
 
-    for (prof, model, host, base, task, n, inp, out, cr, cw, cost, src, fs, ls) in _usage_rows(root, since, now):
+    for (prof, model, host, base, task, bprov, n, inp, out, cr, cw, cost, src, fs, ls) in _usage_rows(root, since, now):
         fs = float(fs if fs is not None else ls); ls = float(ls)
         span = ls - fs
         lo, hi = max(fs, since), min(ls, now)
@@ -302,8 +304,18 @@ def usage(window: int = 7 * 86400, bucket: Optional[int] = None, tz: Optional[st
             pp["input"][i] += inp * f; pp["output"][i] += out * f; pp["cache_read"][i] += cr * f
             mm["calls"][i] += calls * f; mm["billed"][i] += billed * f
             mm["input"][i] += inp * f; mm["output"][i] += out * f; mm["cache_read"][i] += cr * f
-        k = (prof, model, host or ("ModelArk" if ark else ""), task or "main", ark)
-        a = agg.setdefault(k, {"profile": prof, "model": model, "host": k[2], "task": k[3], "modelark": ark, "calls": 0.0,
+        # Who is actually being paid, and is the number an invoice or an estimate? Three payers
+        # now, not two: the ModelArk subscription ($0), a DIRECT provider like DeepSeek (metered,
+        # but it returns no per-call cost so Hermes prices it from the published table — real
+        # money, ESTIMATED), and OpenRouter (metered, and it returns the billed figure).
+        payer = "modelark" if ark else (str(bprov or "").strip().lower() or "openrouter")
+        if payer not in ("modelark", "openrouter"):
+            pass                 # a direct provider: deepseek, and anything added later
+        elif payer == "openrouter" and not host:
+            payer = "openrouter"
+        k = (prof, model, host or ("ModelArk" if ark else ""), task or "main", ark, payer)
+        a = agg.setdefault(k, {"profile": prof, "model": model, "host": k[2], "task": k[3], "modelark": ark,
+                               "payer": payer, "invoiced": payer == "openrouter", "calls": 0.0,
                                "input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0,
                                "billed_usd": 0.0, "cap_equivalent_usd": 0.0})
         a["calls"] += calls * frac; a["input"] += inp * frac; a["output"] += out * frac
@@ -336,8 +348,29 @@ def usage(window: int = 7 * 86400, bucket: Optional[int] = None, tz: Optional[st
     tot = {k: sum(r[k] for r in rows) for k in ("calls", "input", "output", "cache_read", "cache_write")}
     _den = tot["input"] + tot["cache_read"]
     tot["cache_hit_pct"] = round(100.0 * tot["cache_read"] / _den, 1) if _den else None
+    tot["tokens"] = tot["input"] + tot["output"] + tot["cache_read"]
     tot["billed_usd"] = round(sum(r["billed_usd"] for r in rows), 6)
     tot["cap_equivalent_usd"] = round(sum(r["cap_equivalent_usd"] for r in rows), 6)
+    # Split the money by what kind of number it is. An OpenRouter figure is what the invoice will
+    # say; a direct provider's is Hermes' own estimate from the published rate card, because
+    # DeepSeek returns no per-call cost. Presenting them as one number is how a metered provider
+    # starts looking like a free one.
+    tot["invoiced_usd"] = round(sum(r["billed_usd"] for r in rows if r.get("invoiced")), 6)
+    tot["estimated_usd"] = round(sum(r["billed_usd"] for r in rows
+                                     if not r.get("invoiced") and not r["modelark"]), 6)
+    tot["subscription_calls"] = sum(r["calls"] for r in rows if r["modelark"])
+    by_payer = {}
+    for r in rows:
+        b = by_payer.setdefault(r.get("payer") or "openrouter",
+                                {"calls": 0, "billed_usd": 0.0, "input": 0, "output": 0,
+                                 "cache_read": 0, "invoiced": bool(r.get("invoiced"))})
+        b["calls"] += r["calls"]; b["billed_usd"] += r["billed_usd"]
+        b["input"] += r["input"]; b["output"] += r["output"]; b["cache_read"] += r["cache_read"]
+    for b in by_payer.values():
+        b["billed_usd"] = round(b["billed_usd"], 6)
+        d = b["input"] + b["cache_read"]
+        b["cache_hit_pct"] = round(100.0 * b["cache_read"] / d, 1) if d else None
+    tot["by_payer"] = by_payer
     return {"window": window, "bucket": b, "since": since, "now": now, "tz": tzname, "days": round(window / 86400, 4),
             "method": "spread", "rows": sorted(rows, key=lambda r: (-r["billed_usd"], -r["calls"])), "series": series,
             "by_profile": rnd(by_p), "by_model": rnd(by_m), "totals": tot, "generated_at": time.time()}
@@ -351,6 +384,31 @@ def _caps(root: Path) -> dict:
         return {x: k.get(x) for x in ("default_max_cost", "max_cost_ceiling", "max_cost_hard_ceiling") if x in k}
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _direct_provider_balances(root: Path) -> dict:
+    """What a DIRECT provider's own API says is left, next to what Hermes estimated it spent.
+
+    DeepSeek returns no per-call cost, so every Hermes number for that rung is an estimate from
+    the published rate card. Its `/user/balance` endpoint — same key, no second credential — is
+    the invoice side, and `scripts/deepseek-balance-watch.py` records it. Surfacing both is what
+    stops a metered provider reading as a free one.
+    """
+    out = {}
+    try:
+        st = json.loads((root / "state" / "deepseek-balance.json").read_text())
+        out["deepseek"] = {
+            "balance_usd": st.get("balance_usd"),
+            "cumulative_spent_usd": st.get("cumulative_spent_usd"),
+            "window_spent_usd": st.get("window_spent_usd"),
+            "window_estimated_usd": st.get("window_estimated_usd"),
+            "at": st.get("at"),
+            "billing": "metered",
+            "cost_basis": "estimated per call from the published rate card; balance is the invoice side",
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def _runtime_status() -> dict:
@@ -386,6 +444,7 @@ def get_state():
     return {"doc": doc, "revision": int(doc.get("revision") or 0), "live": live, "drift": drift,
             "validation": {"errors": errors, "warnings": warnings}, "history": core.history(root, 40),
             "caps": _caps(root), "runtime": _runtime_status(), "profiles": core.PROFILES,
+            "balances": _direct_provider_balances(root),
             "generated_at": time.time()}
 
 

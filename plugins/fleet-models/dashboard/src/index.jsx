@@ -18,6 +18,14 @@ const fetchJSON = SDK.fetchJSON;
 
 const AUX_TASKS = ["vision", "compression", "title_generation", "background_review", "goal_judge",
   "kanban_decomposer", "web_extract", "session_search", "skills_hub", "approval", "flush_memories"];
+// Three payers. DeepSeek direct is metered — real money — but its API returns no per-call cost,
+// so what Hermes records is an ESTIMATE from the published rate card. It is neither the flat
+// subscription nor an invoiced OpenRouter call, and the page must not imply either.
+const PROV_LABEL = {
+  modelark: "ModelArk · subscription",
+  openrouter: "OpenRouter · metered",
+  deepseek: "DeepSeek direct · metered (estimated)",
+};
 const REASONING = ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const SLOT_LABEL = { main: "Main loop", subagents: "Subagents", cron: "Cron jobs" };
 const TASK_LABEL = { vision: "Vision", compression: "Compression", title_generation: "Titles",
@@ -27,6 +35,30 @@ const TASK_LABEL = { vision: "Vision", compression: "Compression", title_generat
 
 // ── helpers ──────────────────────────────────────────────────────────────────────────────
 const clone = (o) => JSON.parse(JSON.stringify(o));
+// Token counts run to hundreds of millions; a headline card needs them readable at a glance.
+const tok = (n) => {
+  const v = Number(n) || 0;
+  if (v >= 1e9) return (v / 1e9).toFixed(v < 1e10 ? 2 : 1) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(v < 1e7 ? 1 : 0) + "M";
+  if (v >= 1e3) return Math.round(v / 1e3) + "k";
+  return String(v);
+};
+// Three payers, three kinds of number. An OpenRouter figure is what the invoice will say; a
+// DIRECT provider (DeepSeek) is real money that Hermes had to ESTIMATE from the published rate
+// card, because the API returns no per-call cost; the subscription is $0 by construction.
+// Saying "real invoices" over all three is how a metered provider starts looking free.
+const costSub = (T) => {
+  if (!T) return "";
+  const parts = [];
+  if (T.invoiced_usd) parts.push(money(T.invoiced_usd, 2) + " invoiced");
+  if (T.estimated_usd) parts.push(money(T.estimated_usd, T.estimated_usd < 0.01 ? 4 : 2) + " estimated");
+  if (T.subscription_calls) parts.push("subscription $0");
+  return parts.join(" · ") || "no spend in this window";
+};
+const payerSub = (T) => {
+  const bp = (T && T.by_payer) || {};
+  return Object.keys(bp).sort().map((n) => `${num(bp[n].calls)} ${n}`).join(" · ");
+};
 const chainOf = (spec) => (spec == null ? [] : Array.isArray(spec) ? spec : spec.chain || []);
 const reasoningOf = (spec) => (spec && !Array.isArray(spec) ? spec.reasoning || "" : "");
 const withChain = (spec, chain) => (spec && !Array.isArray(spec) ? { ...spec, chain } : chain);
@@ -428,12 +460,18 @@ function FleetView({ state, doc, usage, win, onOpen }) {
   const empty = { calls: 0, billed: 0, ma: 0, hosts: [] };
   const tot = Object.values(byP).reduce((a, u) => ({ calls: a.calls + u.calls, billed: a.billed + u.billed, ma: a.ma + u.ma }), { calls: 0, billed: 0, ma: 0 });
   const models = doc.models || {};
+  const T = (usage && usage.totals) || {};
   const k = (v, f) => (usage ? f(v) : "—");
   return (
     <Fragment>
       <div className="fm-stats">
         <Stat label={`Calls · ${periodShort(win)}`} value={k(tot.calls, num)} sub={lastLabel(win).toLowerCase()} />
-        <Stat label={`Billed · ${periodShort(win)}`} value={k(tot.billed, (v) => money(v, 2))} sub="OpenRouter, real invoices" tone="money" />
+        <Stat label={`Tokens · ${periodShort(win)}`} value={k(T.tokens, tok)}
+          sub={T.tokens ? `${tok(T.input)} in · ${tok(T.output)} out · ${tok(T.cache_read)} cached` : "—"} />
+        <Stat label="Cache hit" value={T.cache_hit_pct == null ? "—" : T.cache_hit_pct + "%"}
+          sub="of prompt tokens served from cache" tone="ok" />
+        <Stat label={`Cost · ${periodShort(win)}`} value={k(tot.billed, (v) => money(v, 2))}
+          sub={costSub(T)} tone="money" />
         <Stat label="ModelArk subscription" value={k(tot.ma, (v) => num(v) + " calls")} sub={tot.calls ? Math.round((100 * tot.ma) / tot.calls) + "% of all calls · $0" : "$0"} tone="sub" />
         <Stat label="Registry" value={Object.keys(models).length + " models"} sub={Object.values(models).filter((m) => m.provider === "modelark").length + " subscription · " + Object.values(models).filter((m) => m.provider === "openrouter").length + " OpenRouter"} />
         <Stat label="Sync" value={Object.keys(state.drift || {}).length ? Object.keys(state.drift).length + " drifted" : "all 9 in sync"} tone={Object.keys(state.drift || {}).length ? "warn" : "ok"} sub={"revision " + state.revision} />
@@ -695,7 +733,7 @@ function ModelDetail({ draft, alias, setDraft, usage, win }) {
     <div className="fm-model">
       <header className="fm-model-head">
         <div>
-          <h2>{m.short || alias} <span className={cls("fm-prov", "fm-prov--" + m.provider)}>{m.provider === "modelark" ? "ModelArk · subscription" : "OpenRouter · metered"}</span></h2>
+          <h2>{m.short || alias} <span className={cls("fm-prov", "fm-prov--" + m.provider)}>{PROV_LABEL[m.provider] || (m.provider + " · metered")}</span></h2>
           <code className="fm-code">{m.id}</code>
         </div>
         <div className="fm-row">
@@ -826,21 +864,31 @@ function ModelsView({ draft, setDraft, usage, win, sel, setSel }) {
 }
 
 // ── Costs view ───────────────────────────────────────────────────────────────────────────
-function CostsView({ doc, usage, win, width }) {
+function CostsView({ doc, usage, win, width, balances }) {
   if (!usage) return <div className="fm-muted">Loading usage…</div>;
   const rows = usage.rows || [];
   const byAgent = {};
   rows.forEach((r) => { (byAgent[r.profile] = byAgent[r.profile] || []).push(r); });
   const tot = rows.reduce((a, r) => ({ billed: a.billed + r.billed_usd, calls: a.calls + r.calls, ma: a.ma + (r.modelark ? r.calls : 0), cap: a.cap + r.cap_equivalent_usd, tin: a.tin + r.input, tout: a.tout + r.output }), { billed: 0, calls: 0, ma: 0, cap: 0, tin: 0, tout: 0 });
+  const T = (usage && usage.totals) || {};
   const idToShort = {};
   Object.values(doc.models || {}).forEach((m) => { idToShort[m.id] = m.short; (m.served_as || []).forEach((s) => { idToShort[s] = m.short; }); });
   return (
     <Fragment>
       <div className="fm-stats">
-        <Stat label={`Billed · ${periodShort(win)}`} value={money(tot.billed, 2)} tone="money" sub="OpenRouter — what actually gets invoiced" />
+        <Stat label={`Cost · ${periodShort(win)}`} value={money(tot.billed, 2)} tone="money" sub={costSub(T)} />
+        <Stat label={`Tokens · ${periodShort(win)}`} value={tok(T.tokens)}
+          sub={`${tok(T.input)} in · ${tok(T.output)} out · ${tok(T.cache_read)} cached`} />
+        <Stat label="Cache hit" value={T.cache_hit_pct == null ? "—" : T.cache_hit_pct + "%"} tone="ok"
+          sub={`${tok(T.cache_read)} of ${tok((T.input || 0) + (T.cache_read || 0))} prompt tokens`} />
         <Stat label="ModelArk subscription" value={num(tot.ma) + " calls"} tone="sub" sub={"$0 · cap-equivalent " + money(tot.cap, 2)} />
-        <Stat label="All calls" value={num(tot.calls)} sub={num(tot.tin) + " in · " + num(tot.tout) + " out tokens"} />
-        <Stat label="Subscription share" value={tot.calls ? Math.round((100 * tot.ma) / tot.calls) + "%" : "—"} sub="of calls served on the flat plan" />
+        <Stat label="All calls" value={num(tot.calls)} sub={payerSub(T)} />
+        {balances && balances.deepseek ? (
+          <Stat label="DeepSeek direct" tone="ds"
+            value={balances.deepseek.balance_usd != null ? money(balances.deepseek.balance_usd, 2) + " left" : "—"}
+            sub={"metered · " + ((T.by_payer && T.by_payer.deepseek)
+              ? money(T.by_payer.deepseek.billed_usd, 4) + " estimated this window" : "no calls this window")} />
+        ) : null}
       </div>
       <Section title="Over time" right={<span className="fm-muted fm-small">{bucketName(usage.bucket)} bars · tap or hover a bar</span>}>
         <TimeChart usage={usage} width={width} />
@@ -858,16 +906,21 @@ function CostsView({ doc, usage, win, width }) {
       <Section title={`By agent, model and host · ${periodShort(win)}`}>
         <div className="fm-table-wrap">
           <table className="fm-table">
-            <thead><tr><th>Agent</th><th>Model</th><th>Served by</th><th>Where</th><th className="r">Calls</th><th className="r">In</th><th className="r">Out</th><th className="r">Cache read</th><th className="r">Billed</th><th className="r">Cap-equiv.</th></tr></thead>
+            <thead><tr><th>Agent</th><th>Model</th><th>Served by</th><th>Where</th><th className="r">Calls</th><th className="r">In</th><th className="r">Out</th><th className="r">Cache read</th><th className="r">Hit %</th><th className="r">Cost</th><th className="r">Cap-equiv.</th></tr></thead>
             <tbody>
               {Object.entries(byAgent).map(([p, rs]) => rs.map((r, i) => (
                 <tr key={p + i}>
                   <td>{i === 0 ? <b>{(doc.agents[p] || {}).name || p}</b> : null}</td>
                   <td>{idToShort[r.model] || <code className="fm-code">{r.model}</code>}</td>
-                  <td>{r.modelark ? <span className="fm-prov fm-prov--modelark">modelark subscription</span> : r.host || "—"}</td>
+                  <td>{r.modelark
+                    ? <span className="fm-prov fm-prov--modelark">modelark subscription</span>
+                    : (r.host || (r.payer && r.payer !== "openrouter"
+                        ? <span className={cls("fm-prov", "fm-prov--" + r.payer)}>{r.payer} direct</span>
+                        : "—"))}</td>
                   <td className="fm-muted">{r.task === "main" ? "main" : TASK_LABEL[r.task] || r.task}</td>
                   <td className="r">{num(r.calls)}</td><td className="r">{num(r.input)}</td><td className="r">{num(r.output)}</td><td className="r">{num(r.cache_read)}</td>
-                  <td className="r">{r.modelark ? "$0" : money(r.billed_usd)}</td>
+                  <td className="r fm-muted">{r.cache_hit_pct == null ? "—" : r.cache_hit_pct + "%"}</td>
+                  <td className="r">{r.modelark ? "$0" : <Fragment>{money(r.billed_usd)}{r.invoiced === false ? <span className="fm-tag--est" title="metered, but the provider returns no per-call cost — Hermes estimates it from the published rate card">est</span> : null}</Fragment>}</td>
                   <td className="r fm-muted">{r.modelark ? money(r.cap_equivalent_usd) : ""}</td>
                 </tr>
               )))}
@@ -1113,7 +1166,7 @@ function ModelsPage() {
         {tab === "fleet" ? <FleetView state={state} doc={doc} usage={shown} win={shown ? shown.window : win} onOpen={(p) => { setAgent(p); setTab("agent"); }} /> : null}
         {tab === "agent" ? <AgentView state={state} draft={draft} setDraft={setDraft} p={agent} setP={setAgent} /> : null}
         {tab === "models" ? <ModelsView draft={draft} setDraft={setDraft} usage={shown} win={shown ? shown.window : win} sel={modelSel} setSel={setModelSel} /> : null}
-        {tab === "costs" ? <CostsView doc={doc} usage={shown} win={shown ? shown.window : win} width={chartW} /> : null}
+        {tab === "costs" ? <CostsView doc={doc} usage={shown} win={shown ? shown.window : win} width={chartW} balances={state.balances} /> : null}
         {tab === "decisions" ? <DecisionsView state={state} draft={draft} setDraft={setDraft} onRevert={revert} /> : null}
       </main>
       {dirty ? (
