@@ -91,8 +91,12 @@ def live_overwatch_pids(task_id: str) -> list:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--apply", action="store_true",
-                    help="terminate an overwatch session past the hard ceiling (default: report only)")
+    # Trap 23: a cron `script` field takes NO ARGUMENTS — the scheduler looks up the whole string
+    # as a file name and reports "Script not found". So the policy is the DEFAULT here and the
+    # escape hatch is the flag, rather than the other way round. Richie 2026-09-15: past the hard
+    # ceiling "they must be dealt with".
+    ap.add_argument("--report-only", action="store_true",
+                    help="do not terminate an overwatch session past the hard ceiling")
     ap.add_argument("--base", type=float, default=BASE)
     ap.add_argument("--hard", type=float, default=HARD)
     a = ap.parse_args()
@@ -140,7 +144,7 @@ def main() -> int:
     for tid, assignee, status, title, spend in ceiling:
         lines.append(f"  CEILING ${spend:.2f} > ${a.hard:.2f}  {tid} [{status}] assignee={assignee} — {title}")
         pids = live_overwatch_pids(tid)
-        if pids and a.apply:
+        if pids and not a.report_only:
             for p in pids:
                 try:
                     os.kill(p, signal.SIGTERM)
@@ -148,7 +152,7 @@ def main() -> int:
                 except Exception as exc:  # noqa: BLE001
                     lines.append(f"    could not signal {p}: {exc}")
         elif pids:
-            lines.append(f"    live pid(s) {pids} — report only (pass --apply to stop them)")
+            lines.append(f"    live pid(s) {pids} — report only (--report-only was passed)")
         else:
             lines.append("    no live session — the spend is already banked; this is the record of it")
     for tid, assignee, status, title, spend in over:

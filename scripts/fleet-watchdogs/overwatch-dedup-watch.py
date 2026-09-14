@@ -94,51 +94,68 @@ def run() -> int:
             if len(mature) < 2:
                 continue
 
-            # Check if any have different idempotency keys
-            keys = {c["idempotency_key"] for c in mature}
-            if len(keys) < 2:
-                # All have the same key — idempotency worked correctly,
-                # the duplicate was prevented.
+            # 2026-09-15 CORRECTION. This used to fire whenever two cards from one source
+            # carried DIFFERENT idempotency keys — which is the normal, intended case: one
+            # escalation legitimately produces several distinct remediation cards. On 2026-09-14
+            # it flagged four such cards (t_796c3fab / t_da58d620 from t_5262a7a8, and
+            # t_56500e82 / t_ce800bec from t_cff44897), all of them real and all with different
+            # subjects, every 15 minutes, and exited 1 each time until failure_streak reached 40
+            # and the scheduler was one step from disabling it. A watchdog that cries wolf and
+            # then silences itself is worse than no watchdog.
+            #
+            # A duplicate is two cards that say the SAME THING, not two cards from one parent.
+            # So: same key (the idempotency check failed to dedupe), or near-identical titles
+            # (two sessions wrote the same card under different keys, which is the shape the
+            # idempotency instruction exists to prevent).
+            import difflib
+            import re as _re
+
+            def _norm(t):
+                t = _re.sub(r"^\s*\[[^\]]+\]\s*", "", (t or "").lower())
+                return _re.sub(r"[^a-z0-9 ]+", " ", t).split()
+
+            dupes = []
+            by_key = {}
+            for c in mature:
+                by_key.setdefault(c["idempotency_key"], []).append(c)
+            for k, cs in by_key.items():
+                if len(cs) > 1:
+                    dupes.append((f"same idempotency key {k}", cs))
+            for i in range(len(mature)):
+                for j in range(i + 1, len(mature)):
+                    a, b = mature[i], mature[j]
+                    if a["idempotency_key"] == b["idempotency_key"]:
+                        continue
+                    ratio = difflib.SequenceMatcher(
+                        None, " ".join(_norm(a["title"])), " ".join(_norm(b["title"]))).ratio()
+                    if ratio >= 0.85:
+                        dupes.append((f"titles {int(ratio * 100)}% identical", [a, b]))
+            if not dupes:
                 continue
 
-            lines = [
-                f"OVERWATCH-DEDUP: {len(mature)} non-archived cards for "
-                f"source {src_id} with different idempotency keys "
-                f"({len(keys)} distinct keys)",
-            ]
-            for c in mature:
-                lines.append(
-                    f"  {c['id']} [{c['status']}] {c['assignee'] or '?'} "
-                    f"key={c['idempotency_key']} | "
-                    f"{(c['title'] or '')[:60]}"
-                )
-            findings.append("\n".join(lines))
+            for why, cs in dupes:
+                lines = [f"OVERWATCH-DEDUP: {len(cs)} cards for source {src_id} — {why}"]
+                for c in cs:
+                    lines.append(
+                        f"  {c['id']} [{c['status']}] {c['assignee'] or '?'} "
+                        f"key={c['idempotency_key']} | {(c['title'] or '')[:60]}"
+                    )
+                findings.append("\n".join(lines))
 
         if findings:
-            # Write to stderr so cron captures it as a warning
-            print(
-                "OVERWATCH-DEDUP-WATCH: duplicate remediation cards detected "
-                "(different idempotency keys for the same source card)",
-                file=sys.stderr,
-            )
+            print("OVERWATCH-DEDUP-WATCH: duplicate remediation cards detected "
+                  "(same key, or two cards saying the same thing)", file=sys.stderr)
             for f in findings:
                 print(f, file=sys.stderr)
-            # Also write to stdout with a machine-readable summary
-            print(
-                json.dumps({
-                    "watchdog": "overwatch-dedup-watch",
-                    "status": "DUPLICATES_FOUND",
-                    "groups": len(findings),
-                    "count": sum(len(g) for g in findings),
-                    "sources": sorted(set(
-                        _source_task_id(r["idempotency_key"])
-                        for cards in groups.values()
-                        for r in cards
-                    )),
-                })
-            )
-            return 1
-
+            print(json.dumps({
+                "watchdog": "overwatch-dedup-watch",
+                "status": "DUPLICATES_FOUND",
+                "groups": len(findings),
+                # was `sum(len(g) for g in findings)`, which summed the LENGTH OF EACH STRING and
+                # reported "count": 903 for four cards.
+                "cards": sum(f.count("\n") for f in findings),
+            }))
+        # Always 0. A finding is not a failure; see the note above about failure_streak.
         return 0
 
     finally:
