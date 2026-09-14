@@ -142,9 +142,32 @@ def _release_overwatch(task_id: str) -> None:
         pass
 
 
-def review_handoff_reclaim_allowed(latest_event: str | None, reason: str | None) -> bool:
-    """A live review handoff is protected unless the operator explicitly overrides."""
-    return latest_event != "review_requested" or (reason or "").startswith("override-review-handoff:")
+# `review_handoff_reclaim_allowed()` lived here until 2026-09-15 (card t_ec55f36f). It was written,
+# tested and never called from anywhere — a guard wearing a test suite while governing nothing, which
+# is the most dangerous state a control can be in on this fleet: the next reader, human or overwatch,
+# believes a review handoff is protected. It is not deleted because the risk was imaginary; it is
+# deleted because the kernel already handles it, and handles it better:
+#
+#   * `kanban_db.reclaim_task` calls `_retry_status_for_run` (kanban_db.py:2336), whose own docstring
+#     is the guarantee — "`review` when the run's `claimed` event says `source_status=review`, else
+#     `ready` — one place, so crash/timeout/reclaim can't silently turn a reviewer run into an
+#     implementation run." A reclaimed review-lane card comes back IN REVIEW.
+#   * That is asserted, not assumed: `test_interrupted_review_runs_retry_in_review_phase` is
+#     parametrised over spawn_failure / expired_claim / MANUAL_RECLAIM / stale_heartbeat.
+#   * `reassign_task` is reclaim + `assign_task`, and `assign_task` (kanban_db.py:1633) only touches
+#     `assignee` and the failure counters — never `status`. A reassigned review card keeps its lane
+#     and gets a different reviewer, which is exactly the documented "this profile's model is broken"
+#     path.
+#
+# So the card's AC3 asked reclaim to REFUSE where the kernel PRESERVES, and preserving is the better
+# verb: refusing would strand a genuinely stuck reviewer with no operator escape. And `reclaim_task` /
+# `reassign_task` have no automatic callers at all — only the CLI (kanban.py:635/644) and three
+# dashboard buttons. The one actor who could swap a reviewer mid-review is overwatch, because
+# AUTHORITY below tells it that it may; that is a prompt, not a code path, and a magic-string override
+# is a weak gate against something that can read this file. The constraint is stated in AUTHORITY
+# instead, where the actor will actually read it, and `assignee-mismatch-watch` is the detection side.
+# Detection over prevention is what has held on this fleet: core-patch-watch reads the diff and misses
+# nothing, while the mint guard is blind to ~70% of minting by construction.
 
 
 def _idempotency_slug(text: str, max_len: int = 60) -> str:
@@ -360,7 +383,12 @@ AUTHORITY = (
     "YOUR AUTHORITY (Richie, 2026-09-06). You MAY: comment, unblock, reassign, split the card "
     "via Jobsy, archive duplicates, rescope, put on hold, open a HELD platform card, and — for a "
     "cost_cap block — extend the cap ONCE by at most $0.50 with `hermes kanban set-cap <id> <cap> "
-    "--reason ...` (hard ceiling $1.50). You may NOT, while cards are running: commit platform "
+    "--reason ...` (hard ceiling $1.50). REASSIGNMENT: a card whose last handoff was "
+    "`review_requested` is mid-review, so reassigning it SWAPS THE REVIEWER — your `--reason` must "
+    "say why this reviewer is being replaced (its model is failing, it is stalled, it is the "
+    "author of the work). The lane itself is safe either way: the kernel returns a reclaimed review "
+    "run to `review`, never to `ready`. A reassignment whose reason does not say why is picked up "
+    "by assignee-mismatch-watch and comes back to Richie. You may NOT, while cards are running: commit platform "
     "code, restart a gateway, edit a SOUL, waive a review or test gate, raise a cap past $1.50, "
     "or create a card assigned to yourself. A defective gate is a held platform card, not an "
     "exemption. Finish quickly, hygienically and cheaply, keeping every agreed review and test "

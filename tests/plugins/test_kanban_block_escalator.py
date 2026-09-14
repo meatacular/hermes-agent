@@ -40,7 +40,17 @@ def test_ac1_skip_is_recorded_with_holder(tmp_path, monkeypatch):
     assert recorded == [("t_card", os.getpid(), "needs_input")]
 
 
-def test_ac3_review_handoff_requires_explicit_override():
-    assert mod.review_handoff_reclaim_allowed("review_requested", "stuck") is False
-    assert mod.review_handoff_reclaim_allowed("review_requested", "override-review-handoff: stale reviewer") is True
-    assert mod.review_handoff_reclaim_allowed("completed", "stuck") is True
+def test_no_dead_review_handoff_guard_remains():
+    """2026-09-15, card t_ec55f36f. `review_handoff_reclaim_allowed` was defined here and tested
+    here and called from NOWHERE — a guard that reads as installed and governs nothing. It is gone,
+    the kernel's `_retry_status_for_run` is what actually keeps a reclaimed review run in the review
+    phase, and the reassignment constraint now lives in AUTHORITY where overwatch reads it.
+
+    This test replaces the three assertions that used to exercise the dead function, and asserts the
+    two things that must stay true instead: the function has not crept back, and AUTHORITY still
+    carries the constraint that replaced it."""
+    assert not hasattr(mod, "review_handoff_reclaim_allowed"), (
+        "the dead guard is back — if it is needed it must have a CALL SITE, not just a test")
+    assert "REASSIGNMENT:" in mod.AUTHORITY
+    assert "review_requested" in mod.AUTHORITY
+    assert "assignee-mismatch-watch" in mod.AUTHORITY
