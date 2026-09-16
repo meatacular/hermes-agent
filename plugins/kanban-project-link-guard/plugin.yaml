@@ -1,0 +1,43 @@
+name: kanban-project-link-guard
+version: 1.0.0
+kind: backend
+author: Agent Smith for Richie, 2026-09-16
+description: >-
+  Refuse `kanban_create` when an EXPLICIT `project` cannot be resolved, instead of
+  silently minting a repo-less scratch card.
+
+  The defect (card t_331cb549, reported by jobsy 2026-09-16). `kanban_db._resolve_project_link`
+  returns `(None, None, None, workspace_kind)` when an explicitly supplied project id or slug
+  is not in the caller's projects.db — a deliberate "never a dangling reference, never a
+  crash" trade-off. In practice the creator is told NOTHING, so a typo or a wrong-registry
+  id produces an ordinary scratch card that looks normal on the board while its worker opens
+  in an empty directory. Two cards were wasted on it in one cut: `t_ca4b119d` (a slug that
+  does not exist) and `t_135274de` (`p_3d4a6fe1`, an id that lives on the board but not in
+  the caller's store, so it can never resolve from a cold start).
+
+  Why this is a plugin and not the kernel patch the card originally proposed: a change to
+  `hermes_cli/kanban_db.py` is upstream merge surface, and the standing rule is that policy
+  lives on upstream's hook surface while upstream's kanban stays the substrate (2026-09-09
+  decision; the 2026-09-12 batch that ignored it rewrote `tools/kanban_tools.py` +3891/-1945,
+  dropped another card's work and spawned three repair cards). `pre_tool_call` is the seam
+  `kanban-mint-guard` already uses for the same class of defect.
+
+  Decision-EXACT, not a second opinion. On the tool path `kanban_tools._handle_create` only
+  sets `project_source_task_id` when the caller passed NO project at all, so an explicitly
+  supplied value has exactly one way to resolve — the same `projects_db.get_project` call
+  this guard makes. It cannot refuse a card the kernel would have linked.
+
+  Implicit path untouched by construction: no `project` key, `project=None`, `project=""`,
+  and every board-inherited or self-task-inherited link are allowed through. Only a
+  non-empty EXPLICIT value that does not resolve is refused.
+
+  kind: backend so it loads in every profile and every kanban worker — a plugin in
+  ~/.hermes/plugins is invisible to workers.
+
+  Fail-open in every direction: an unreadable store, a malformed payload, any exception at
+  all, or a tool that is not `kanban_create` -> the call proceeds exactly as it does today.
+
+  NOT COVERED, and this is deliberate: the `hermes kanban create --project X` CLI path goes
+  straight to `create_task` with no plugin hook available (`pre_command` is observer-only in
+  v1 and fires for agent slash-commands, not CLI subcommands). Reporting the same error there
+  needs the kernel change; it is escalated to Richie rather than taken unilaterally.
