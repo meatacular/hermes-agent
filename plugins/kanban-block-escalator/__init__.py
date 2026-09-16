@@ -625,9 +625,18 @@ def on_block(task_id: str = "", assignee: str | None = None, reason: str | None 
 # refused none of the measured changes, so all three surfaces are guarded.
 #
 # Residual, stated rather than implied: a session that writes through a path this gate cannot
-# recognise (an arbitrary script, `execute_code` calling `kanban_db` in-process) is not stopped.
+# recognise (an arbitrary script, `execute_code` calling `kanban_db` in-process) is not stopped, and
+# `kanban_create` is deliberately ungated, so a duplicate session can still mint a second card.
 # The gate refuses what it can SEE and names the reason; the airtight fix is the poller itself,
 # which is core, and therefore Richie's call — not something this plugin can carry.
+#
+# THE BACKSTOP, AND ITS TIMING (fleet-control-change rule 13): the ceiling counter (`is_hard_stop`,
+# author-agnostic since `07c72dfa`) counts decisions. A write that slips past this gate is counted
+# there and the card reaches its ceiling — but the counter reads what has ALREADY landed, so it
+# fires after the second decision, not before it. Nothing else acts earlier: the lease refuses a
+# duplicate SPAWN and this gate refuses a duplicate WRITE to the assessed card, and those two are
+# the only controls on this path. Which is why the residual above is stated rather than dressed up:
+# for an unrecognised write path there is no before-the-harm control at all.
 #
 # Fail OPEN on internal error (the `kanban-mint-guard` precedent): this gate protects one card from
 # a duplicate decision, it is not a security boundary, and a guard that refuses the whole board
