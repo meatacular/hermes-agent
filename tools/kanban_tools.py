@@ -23,7 +23,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
-from tools.registry import registry, tool_error
+from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
@@ -41,9 +41,28 @@ KANBAN_LIST_MAX_LIMIT = 200
 # --- Gating ---
 
 def _profile_has_kanban_toolset() -> bool:
-    # load_config() is mtime-cached and check_fn results are TTL-cached (~30s).
+    from tools.kanban_toolset_context import kanban_toolset_requested
+
+    requested = kanban_toolset_requested()
+    if requested:
+        return True
     try:
-        return "kanban" in load_config().get("toolsets", [])
+        config = load_config()
+        # Preserve the legacy profile-wide opt-in for callers using bundles.
+        if "kanban" in (config.get("toolsets") or []):
+            return True
+        if requested is not None:
+            # Never borrow another platform's opt-in during schema assembly.
+            return False
+        # Offer-time skill discovery has no platform selection. A saved opt-in
+        # makes the playbook relevant; actual schemas still use the scope above.
+        from hermes_cli.tools_config import _get_platform_tools
+
+        platforms = config.get("platform_toolsets") or {}
+        return any(
+            "kanban" in _get_platform_tools(config, platform, include_default_mcp_servers=False)
+            for platform, names in platforms.items() if isinstance(names, list)
+        )
     except Exception:
         return False
 
@@ -77,11 +96,13 @@ def _visible(*, to_env_worker: bool) -> bool:
     return _profile_has_kanban_toolset()
 
 
+@no_cache_check_fn
 def _check_kanban_mode() -> bool:
     """Lifecycle tools: dispatcher workers + profiles with the ``kanban`` toolset."""
     return _visible(to_env_worker=True)
 
 
+@no_cache_check_fn
 def _check_kanban_orchestrator_mode() -> bool:
     """Board-routing tools (kanban_list, kanban_unblock): hidden from task workers."""
     return _visible(to_env_worker=False)
@@ -603,6 +624,12 @@ def _handle_complete(args: dict, **kw) -> str:
                 f"Your task is still in-flight and its scratch workspace was kept. Fix the "
                 f"artifact path or storage error, then retry kanban_complete with the same "
                 f"handoff.")
+        except kb.LiveClaimError as claim_err:
+            # Env-less caller (orchestrator, another session) on a card a dispatcher
+            # worker is executing: refusing here is what keeps that worker's run open.
+            return tool_error(
+                f"kanban_complete refused: {claim_err}. Nothing changed. Wait for the worker "
+                f"to finish, or an operator can run `hermes kanban complete --force {tid}`.")
         except kb.HallucinatedCardsError as hall_err:
             # The gate runs before the write txn, so the task was NOT mutated;
             # say so explicitly or the model treats the error as terminal and
@@ -663,6 +690,9 @@ def _handle_request_review(args: dict, **kw) -> str:
     if metadata is not None:
         metadata = _redact_metadata(metadata)
         _check(metadata is not None, "metadata could not be safely serialized")
+    artifacts = _coerce_str_list(args.get("artifacts"), "artifacts", "file paths", strip=True)
+    if artifacts:
+        metadata = _merge_artifacts(metadata, artifacts)
     metadata = _stamp_worker_session_metadata(tid, metadata)
     # Reviewer is model-supplied free text stored durably on the event payload.
     reviewer = _redact_opt(args.get("reviewer") or None)
@@ -710,9 +740,19 @@ def _handle_request_review(args: dict, **kw) -> str:
                 f"of {gate_bounce.rung} output. Fix the {gate_bounce.rung} and call "
                 f"kanban_request_review again.\n\n" + tail
             )
-        ok, fail_reason = kb.request_review(
-            conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
-            expected_run_id=_worker_run_id(tid), with_reason=True)
+        try:
+            ok, fail_reason = kb.request_review(
+                conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
+                expected_run_id=_worker_run_id(tid), with_reason=True)
+        except kb.ArtifactPreservationError as artifact_err:
+            # Same contract as kanban_complete (#22923): the transition rolled
+            # back, the task is untouched and retryable — say so explicitly or
+            # the model treats the tool_error as terminal.
+            return tool_error(
+                f"kanban_request_review could not preserve the declared artifacts: {artifact_err}. "
+                f"Your task is still in-flight (no state change) and its scratch workspace was "
+                f"kept. Fix the artifact path or storage error, then retry "
+                f"kanban_request_review with the same handoff.")
         _check(ok, f"could not request review for {tid}: "
                    f"{fail_reason or 'unknown id or not in running/ready'}")
         return _ok_landed(kb, conn, tid, "review")
@@ -935,7 +975,10 @@ def _handle_create(args: dict, **kw) -> str:
             _assignee_parked=_parked,
             created_by=os.environ.get("HERMES_PROFILE") or "worker", session_id=session_id)
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
-        payload = dict(task_id=new_tid, **landed,
+        # Upstream: say whether a parent dependency gates this card (dependency_wait).
+        wait = [e for e in kb.list_events(conn, new_tid) if e.kind == "dependency_wait"]
+        gate = {"gated": True, "gated_by": wait[-1].payload["parent"]} if wait else {"gated": False}
+        payload = dict(task_id=new_tid, **landed, **gate,
                        subscribed=_maybe_auto_subscribe(conn, new_tid))
         if _parked:
             # FLEET: an unknown assignee parks the card in triage rather than
@@ -1058,8 +1101,9 @@ def _handle_link(args: dict, **kw) -> str:
     child_id = args.get("child_id")
     _check(parent_id and child_id, "both parent_id and child_id are required")
     with _board(args.get("board")) as (kb, conn):
-        kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
-        return _ok(parent_id=parent_id, child_id=child_id)
+        gated = kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
+        return _ok(parent_id=parent_id, child_id=child_id, gated=gated,
+                   **({"gated_by": parent_id} if gated else {}))
 
 
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
