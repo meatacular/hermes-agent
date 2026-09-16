@@ -98,6 +98,56 @@ BUSY_SQL = (
 )
 QUIET_MIN = float(os.environ.get("APPLY_QUEUE_QUIET_MIN", "10"))
 
+# 2026-09-17 (Richie, Phase 0 of BOARD-REVIEW-AND-PLAN-2026-09-16): a kernel item lands only when
+# (1) its source card is `done` and passed a REVIEW — the last review_requested run was followed by a
+# `completed` run from a different profile, with no changes_requested after it — and (2) Richie's
+# approval is on the board in his own voice: `core_patch_approval_comment` names a task_comments row
+# authored from his channels. `core_patch_approved: true` alone is written by the worker that built
+# the patch, so on its own it certifies nothing. On 2026-09-16 items 006 and 009 were armed with it
+# and neither had ever passed review; 007 was armed while its build card was still running.
+APPROVER_AUTHORS = ("desktop", "dashboard")
+
+
+def kernel_item_cleared(item):
+    """(ok, reason). Fail CLOSED: an unreadable board or a missing field means not cleared."""
+    card = item.get("card")
+    if not card:
+        return False, "names no source `card`, so its review cannot be checked"
+    appr = item.get("core_patch_approval_comment")
+    try:
+        appr = int(appr)
+    except (TypeError, ValueError):
+        return False, ("carries no `core_patch_approval_comment` (the task_comments id of Richie's "
+                       "approval on the board)")
+    try:
+        con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        try:
+            row = con.execute("SELECT status FROM tasks WHERE id = ?", (card,)).fetchone()
+            runs = con.execute("SELECT profile, outcome FROM task_runs WHERE task_id = ? "
+                               "AND outcome IN ('review_requested','changes_requested','completed') "
+                               "ORDER BY id", (card,)).fetchall()
+            who = con.execute("SELECT author FROM task_comments WHERE id = ?", (appr,)).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        return False, f"board unreadable ({e})"
+    if not row:
+        return False, f"source card {card} does not exist"
+    if row[0] != "done":
+        return False, f"source card {card} is `{row[0]}`, not done"
+    last_rr = max((i for i, r in enumerate(runs) if r[1] == "review_requested"), default=None)
+    if last_rr is None:
+        return False, f"source card {card} never went through review"
+    after = runs[last_rr + 1:]
+    if any(r[1] == "changes_requested" for r in after):
+        return False, f"source card {card}'s last review requested changes"
+    if not any(r[1] == "completed" and r[0] != runs[last_rr][0] for r in after):
+        return False, f"source card {card} has no approving review by a different profile"
+    if not who or who[0] not in APPROVER_AUTHORS:
+        return False, (f"approval comment {appr} is not Richie's (author "
+                       f"{who[0] if who else 'missing'!r}, needs one of {', '.join(APPROVER_AUTHORS)})")
+    return True, "reviewed and approved"
+
 
 def log(msg):
     LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -257,6 +307,32 @@ def main():
             f"{', '.join(d['id'] for d in pending)}")
         return 0
     pending = [d for d in pending if in_window() or d.get("urgent")]
+
+    # A kernel item that is approved on paper but not cleared (kernel_item_cleared) is WAITING, not
+    # failing: it is stepped over so the rest of the queue is not parked behind it, it never lands,
+    # and it says why once a day rather than every tick.
+    ready = []
+    for d in pending:
+        sp = QUEUE / (d.get("script") or f"{d['id']}.sh")
+        if sp.is_file() and d.get("core_patch_approved") and touches_kernel(sp.read_text()):
+            ok, why_not = kernel_item_cleared(d)
+            if not ok:
+                log(f"{d['id']}: held — kernel item not cleared: {why_not}")
+                note = STATE / f".kernel-wait-{d['id']}"
+                last = 0.0
+                try:
+                    last = float(json.loads(note.read_text()).get("at", 0))
+                except Exception:  # noqa: BLE001
+                    pass
+                if time.time() - last >= 86400:
+                    note.write_text(json.dumps({"at": time.time(), "why": why_not}))
+                    print(f"apply-queue: HELD {d['id']} — it patches the kernel and is not cleared to "
+                          f"land: {why_not}. Nothing was run; later items are not blocked by it.")
+                continue
+        ready.append(d)
+    if not ready:
+        return 0
+    pending = ready
 
     item = pending[0]                                   # ONE per tick, in id order
     iid = item["id"]
