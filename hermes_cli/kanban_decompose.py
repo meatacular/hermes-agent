@@ -328,13 +328,22 @@ class _Routing:
     valid_names: set[str]
 
 
-def _load_routing() -> _Routing:
-    cfg = _load_config()
+def _load_routing(*, tenant: Optional[str] = None, config: Optional[dict] = None) -> _Routing:
+    cfg = _load_config() if config is None else config
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
     roster, valid_names = _build_roster()
+    orchestrator = _resolve_profile_from_cfg(cfg, "orchestrator_profile")
+    default_assignee = _resolve_profile_from_cfg(cfg, "default_assignee")
+    # Config is the policy seam: profiles are keyed to the tenants they may
+    # orchestrate. An absent tenant preserves the historical configured route.
+    # A wildcard lets the configured fallback retain today's default behavior.
+    scopes = kanban_cfg.get("orchestrator_scopes", {})
+    allowed = scopes.get(orchestrator) if isinstance(scopes, dict) else None
+    if tenant and isinstance(allowed, list) and tenant not in allowed and "*" not in allowed:
+        orchestrator = default_assignee
     return _Routing(
-        orchestrator=_resolve_profile_from_cfg(cfg, "orchestrator_profile"),
-        default_assignee=_resolve_profile_from_cfg(cfg, "default_assignee"),
+        orchestrator=orchestrator,
+        default_assignee=default_assignee,
         auto_promote=bool(kanban_cfg.get("auto_promote_children", True)),
         roster=roster,
         valid_names=valid_names,
@@ -492,7 +501,7 @@ def decompose_task(
             "fan-out trigger)",
         )
 
-    routing = _load_routing()
+    routing = _load_routing(tenant=task.tenant)
     raw, reason = _call_aux(
         "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,
         user=_USER_TEMPLATE.format(

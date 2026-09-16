@@ -1774,6 +1774,13 @@ DEFAULT_CONFIG = {
         # Profile for the root/orchestration task after Triage decomposition; "" = default profile.
         # Does not control the decomposer LLM path (see auxiliary.kanban_decomposer).
         "orchestrator_profile": "",
+        # Profiles may only own decomposed roots for listed tenants. An absent
+        # tenant preserves legacy routing; "*" is the explicit all-tenant scope.
+        "orchestrator_scopes": {
+            "axel": ["weroll"], "jobsy": ["*"], "bob": ["*"],
+            "rodge": ["*"], "steve-o": ["*"], "karl": ["*"],
+            "default": ["*"],
+        },
         # Assignee when the orchestrator can't match one to an installed profile; "" = default
         # profile. A task never ends up with assignee=None.
         "default_assignee": "",
