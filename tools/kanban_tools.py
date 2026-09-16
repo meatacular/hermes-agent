@@ -1415,10 +1415,13 @@ def _project_python(worktree_root: str) -> Optional[str]:
 
 
 def _run_capture(args: list[str], cwd: str) -> tuple[int, str]:
-    """Run a command locally, capturing combined output.  Returns (rc, output)."""
+    """Run a gate command without leaking the Hermes Python environment."""
     try:
+        env = os.environ.copy()
+        for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONNOUSERSITE"):
+            env.pop(name, None)
         proc = subprocess.run(
-            args, cwd=cwd, capture_output=True, text=True, timeout=_GATE_RUN_TIMEOUT
+            args, cwd=cwd, env=env, capture_output=True, text=True, timeout=_GATE_RUN_TIMEOUT
         )
         combined = proc.stdout or ""
         if proc.stderr:
