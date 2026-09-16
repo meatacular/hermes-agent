@@ -51,7 +51,7 @@ def test_ac_cli_unresolvable_project_refuses_without_row(kanban_home):
     for var in ("HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_KANBAN_TASK"):
         env.pop(var, None)
     result = subprocess.run(
-        [shutil.which("hermes") or "hermes", "kanban", "create", "cli probe", "--project", "p_missing", "--assignee", "bob"],
+        [sys.executable, "-m", "hermes_cli.main", "kanban", "create", "cli probe", "--project", "p_missing", "--assignee", "bob"],
         env=env, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 2
@@ -65,7 +65,7 @@ def test_ac_cli_unresolvable_project_refuses_without_row(kanban_home):
     with pdb.connect_closing() as pconn:
         project_id = pdb.create_project(pconn, name="CLI resolved", primary_path=str(repo))
     result = subprocess.run(
-        [shutil.which("hermes") or "hermes", "kanban", "create", "cli resolved", "--project", project_id, "--assignee", "bob"],
+        [sys.executable, "-m", "hermes_cli.main", "kanban", "create", "cli resolved", "--project", project_id, "--assignee", "bob"],
         env=env, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0
