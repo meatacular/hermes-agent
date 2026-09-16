@@ -203,9 +203,11 @@ def install() -> list:
     done = []
     from agent import usage_pricing as up
     if not getattr(up.resolve_billing_route, _MARK, False):
-        up.resolve_billing_route = _wrap_route(up.resolve_billing_route); done.append("resolve_billing_route")
+        up.resolve_billing_route = _wrap_route(up.resolve_billing_route)
+    done.append("resolve_billing_route")
     if not getattr(up.estimate_usage_cost, _MARK, False):
-        up.estimate_usage_cost = _wrap_estimate(up.estimate_usage_cost, up); done.append("estimate_usage_cost")
+        up.estimate_usage_cost = _wrap_estimate(up.estimate_usage_cost, up)
+    done.append("estimate_usage_cost")
     # Modules that bound estimate_usage_cost by name before this plugin loaded.
     for modname in ("agent.turn_usage", "agent.insights"):
         mod = sys.modules.get(modname)
@@ -214,16 +216,14 @@ def install() -> list:
             mod.estimate_usage_cost = up.estimate_usage_cost; done.append(modname)
     try:
         from hermes_cli import kanban_db as kdb
-        was_wrapped = getattr(kdb._session_cost_in_db, "_costscope_wrapped", False)
-        scope_installed = _ensure_costscope(kdb)
+        _ensure_costscope(kdb)
         # costscope is a sibling backend and owns the one predicate.  In the
-        # normal loader it runs in dependency order; keep a clear failure when
-        # an isolated import omits it rather than rebuilding its SQL here.
-
+        # normal loader it runs in dependency order; isolated imports install
+        # it here rather than rebuilding its SQL in this plugin.
         kdb.costscope_cap_equivalent = cap_equivalent_rows
         if getattr(kdb._session_cost_in_db, "_costscope_wrapped", False):
-            done.append("_session_cost_in_db")
-        if scope_installed:
+            if "_session_cost_in_db" not in done:
+                done.append("_session_cost_in_db")
             done.append("costscope_cap_equivalent")
         kdb.modelark_cap_equivalent = modelark_cap_equivalent
     except Exception as exc:  # noqa: BLE001
