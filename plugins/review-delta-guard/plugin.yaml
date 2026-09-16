@@ -1,0 +1,62 @@
+name: review-delta-guard
+version: 1.0.0
+kind: backend
+provides_hooks:
+  - pre_tool_call
+author: Agent Smith for Richie, 2026-09-16
+description: >-
+  Refuse a rework that hands the SAME tree back to review, instead of letting a
+  zero-commit round re-enter the review lane claiming "present and verified".
+
+  The defect (card t_48b49faa, measured on card t_8dd715c6, 2026-09-16). Round-2 review
+  requested changes at head `4136e1e`. The next implementation round produced
+  `git diff --stat 4136e1e..HEAD` -> 0 files, 0 insertions, 0 deletions, an empty
+  `git status --porcelain`, and a reflog ending at `4136e1e` — yet its review_requested
+  handoff read "Implementation is present and verified with 5/5 focused briefing tests,
+  37/37 frontend tests, 25/25 backend briefing tests". Nothing at the routing layer
+  compared the head the reviewer REJECTED with the head being handed BACK, so a
+  non-attempt and a rework were the same event. Cost: one worker round plus one review
+  round spent on byte-identical code (the reviewer only caught it because a delta check
+  occurred to them), and a handoff that reads as a truthful completion.
+
+  Why this is a plugin and not the core patch the card first considered: the go/no-go
+  ladder is plugin -> watchdog -> skill -> soul -> config, a core patch is never the
+  fallback, and `pre_tool_call` is the seam `kanban-mint-guard` and
+  `kanban-project-link-guard` already use for exactly this class of defect. No kernel
+  file is touched.
+
+  ONE VARIABLE, TWO TRANSITIONS:
+    * `kanban_request_changes` (the reviewer's verdict) RECORDS the worktree head —
+      "the sha this changes_requested was raised at";
+    * `kanban_request_review` (the implementer's handoff) REFUSES when that same tree
+      comes back: `git diff --stat <recorded>..<HEAD>` empty. The refusal names the sha,
+      the run that rejected it, and the three ways forward (move the head / name the
+      blocker with the command output that proves it / declare `delta-exempt: <reason>`).
+    * an ALLOWED rework handoff gains the delta as metadata (`review_delta_base`,
+      `review_delta_head`, `review_delta_stat`), so the reviewer is told what changed
+      since the verdict instead of re-deriving whether anything did.
+
+  The record is written by the VERDICT, never by the handoff, and that is deliberate: a
+  handoff can still fail downstream (the pre-review ladder bounces, parents unsatisfied),
+  and a record written then would make the immediate retry look like a repeat. The
+  reviewer's process reads the same worktree the implementer writes, so no new state is
+  invented beyond the head itself (one small JSON file per card under
+  `<root>/state/review-delta/`). An `operator_hold`-style escape is not needed: the
+  exemption is per-card and per-call.
+
+  SCOPE — narrow on purpose:
+    * only `workspace_kind == 'worktree'` cards. A shared `dir` workspace has no
+      per-card head, so there is nothing to compare and the guard stands down.
+    * only when a changes_requested verdict is on record AND its run actually landed
+      (`task_runs.outcome == 'changes_requested'`). A stray verdict the kernel refused
+      must not wedge a legitimate handoff.
+    * zero delta = identical TREES, so an empty commit (HEAD moved, content did not)
+      is refused too.
+
+  Fail-open everywhere else: no record, no worktree, a workspace that is not a repo, an
+  unresolvable sha, an unreadable store, any exception -> the call proceeds exactly as it
+  does today. A guard that refuses a handoff the review lane would have accepted stops the
+  board, which is worse than the defect it prevents.
+
+  kind: backend so it loads in every profile and every kanban worker — a plugin in
+  ~/.hermes/plugins is invisible to workers.
