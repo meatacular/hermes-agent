@@ -40,6 +40,7 @@ fire-and-forget spawn in its own session; ``switch`` is never a target.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -77,6 +78,11 @@ HARD_CEILING_FALLBACK = 1.50
 BRIEF_DIR = Path(os.path.expanduser("~/.hermes/logs/overwatch"))
 CLAIM_DIR = Path(os.environ.get("HERMES_OVERWATCH_CLAIM_DIR", "~/.hermes/state/overwatch")).expanduser()
 CLAIM_TTL_SECONDS = 15 * 60
+# How long a RESERVATION holds the card's slot before a holder has to exist. `_claim_overwatch`
+# takes the slot with `pid: 0`, then `_spawn` writes the spawned child's pid over it a few
+# milliseconds later; a reservation still unclaimed after this long is a spawn that never
+# happened (the process died between reserve and exec), and is reaped like any other dead holder.
+CLAIM_SPAWN_GRACE_SECONDS = 60
 
 # Idempotency key derivation for overwatch-minted remediation cards
 # (2026-09-14, t_d8c477dd). Two concurrent overwatch sessions working the same
@@ -107,32 +113,90 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _claim_overwatch(task_id: str, reason: str) -> bool:
-    """Take one per-card lease, atomically; reap dead/expired holders."""
+def _claim_state(path: Path) -> tuple[str, int | str]:
+    """(``"held"`` | ``"free"``, holder) for one claim file — the ONE place the lease's meaning lives.
+
+    The lease used to record ``os.getpid()``: the BLOCKED WORKER's pid, because the
+    ``kanban_task_blocked`` hook runs inside the worker's own process. The worker exits seconds
+    after blocking while the assessment it triggered runs for minutes, so the lease expired
+    almost at once and a second escalation for the same card was no longer refused — measured on
+    ``t_b6ebc5ec`` and ``t_0a677768`` (2026-09-16, t_2da01ffe). Two states, one reader:
+
+      * ``pid <= 0`` — a RESERVATION: ``_spawn`` has taken the slot and not yet handed it to the
+        child it is starting. Held for ``CLAIM_SPAWN_GRACE_SECONDS``, then reaped: a reservation
+        that old belongs to a spawn that never happened.
+      * ``pid > 0`` — the spawned child's own pid, written by ``_spawn`` from ``Popen``'s return
+        (with the child ``exec``-ing straight into hermes, that pid IS the assessor for its whole
+        life). Held while that process lives, and while the claim is inside ``CLAIM_TTL_SECONDS``.
+    """
+    try:
+        holder = json.loads(path.read_text())
+        pid = int((holder or {}).get("pid") or 0)
+        created = float((holder or {}).get("created_at") or 0)
+    except Exception:  # noqa: BLE001 — unreadable body, or not a dict at all
+        return "free", "unreadable"
+    if pid <= 0:
+        return ("held" if time.time() - created <= CLAIM_SPAWN_GRACE_SECONDS else "free"), "reserved"
+    if time.time() - created > CLAIM_TTL_SECONDS:
+        return "free", pid
+    return ("held" if _pid_alive(pid) else "free"), pid
+
+
+def _take_claim(task_id: str, reason: str) -> bool:
+    """Create the reservation atomically (O_EXCL) — the only writer that can lose a race."""
     CLAIM_DIR.mkdir(parents=True, exist_ok=True)
-    path = _claim_path(task_id)
-    payload = {"pid": os.getpid(), "created_at": time.time(), "reason": reason}
+    payload = {"pid": 0, "created_at": time.time(), "reason": reason, "state": "reserved"}
+    try:
+        fd = os.open(_claim_path(task_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as handle:
+        json.dump(payload, handle)
+    return True
+
+
+def _claim_overwatch(task_id: str, reason: str) -> bool:
+    """Take one per-card lease, atomically; reap dead/expired holders.
+
+    The lease is RESERVED here and handed to the spawned child by ``_spawn`` (see
+    ``_claim_state``) — the holder that matters is the process doing the assessment, not the
+    worker that fired the hook.
+    """
     for _ in range(2):
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, "w") as handle:
-                json.dump(payload, handle)
+        if _take_claim(task_id, reason):
             return True
-        except FileExistsError:
-            try:
-                holder = json.loads(path.read_text())
-                pid = int(holder.get("pid", 0))
-                stale = time.time() - float(holder.get("created_at", 0)) > CLAIM_TTL_SECONDS
-                if not stale and _pid_alive(pid):
-                    _record_claim_skip(task_id, pid, reason)
-                    return False
-                path.unlink()
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
+        state, holder = _claim_state(_claim_path(task_id))
+        if state == "held":
+            _record_claim_skip(task_id, holder, reason)
+            return False
+        # Dead, expired, or corrupt: the lease is not protecting anything. One function releases
+        # it, so the reserve/handoff/reap paths cannot each grow their own idea of "released".
+        _release_overwatch(task_id)
     return False
+
+
+def _hand_lease_to_child(task_id: str, pid: int) -> None:
+    """Move the reservation onto the spawned child, atomically (write-then-rename).
+
+    Never a bare truncating write: a reader that caught the file half-written would see an
+    unreadable body and release a lease that is very much in use.
+    """
+    path = _claim_path(task_id)
+    if int(pid) <= 0:
+        # A spawn that named no process cannot hold a lease: leave the reservation, which
+        # `_claim_state` reaps after CLAIM_SPAWN_GRACE_SECONDS, rather than writing a holder
+        # that was never there.
+        logger.debug("kanban-block-escalator: no pid to hand the lease on %s to", task_id)
+        return
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    payload = {"pid": int(pid), "created_at": time.time(), "reason": "spawn", "state": "held"}
+    try:
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("kanban-block-escalator: could not hand the lease on %s to pid %s: %s", task_id, pid, exc)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
 
 
 def _release_overwatch(task_id: str) -> None:
@@ -211,16 +275,27 @@ def _is_truly_blocked(card: dict | None) -> bool:
     return bool(card) and card.get("status") in ("blocked", "triage")
 
 
-def _count_comments(task_id: str, prefix: str, author: str | None = None) -> int:
+def _count_comments(task_id: str, prefix: str) -> int:
+    """How many comments on this card open with ``prefix`` — the ceiling's unit of account.
+
+    AUTHOR-AGNOSTIC, deliberately, and that is the whole reason the parameter is gone
+    (2026-09-16, t_2da01ffe). The counter used to read ``body LIKE 'overwatch:%' AND
+    author = 'default'``. Measured against the real board, the author is not a boundary: the
+    overwatch actor that woke from the notification poller wrote its ruling comment through
+    ``tools/kanban_tools.py``, which signs ``os.environ.get("HERMES_PROFILE") or "worker"`` —
+    and a session started as ``--profile default serve`` carries no ``HERMES_PROFILE``. So that
+    ruling was signed ``worker`` and the ceiling read **1** where two decisions existed
+    (``t_b6ebc5ec``), and on ``t_0a677768`` it read **0** where one existed.
+
+    Who wrote a decision is not what the limit is about: the limit is how many times this card
+    has already been ruled on. Over-counting is the safe direction — a card reaching its ceiling
+    a touch early lands a rundown in front of Richie; under-counting lets a card run past it.
+    """
     try:
         con = _ro()
         try:
             q = "SELECT COUNT(*) FROM task_comments WHERE task_id = ? AND body LIKE ?"
-            p = [task_id, prefix + "%"]
-            if author:
-                q += " AND author = ?"
-                p.append(author)
-            return int(con.execute(q, p).fetchone()[0])
+            return int(con.execute(q, [task_id, prefix + "%"]).fetchone()[0])
         finally:
             con.close()
     except Exception:  # noqa: BLE001
@@ -259,8 +334,13 @@ def should_trigger(card: dict) -> tuple[bool, str]:
 
 
 def is_hard_stop(task_id: str, card: dict) -> tuple[bool, str]:
-    """Second overwatch on one card, or a cost breach past the extension."""
-    n = _count_comments(task_id, OVERWATCH_MARKER, author=OVERWATCH)
+    """Second overwatch DECISION on one card, or a cost breach past the extension.
+
+    The unit is decisions, not sessions spawned (Richie, 2026-09-16): counting processes makes
+    the limit depend on how many happened to wake, which is the number the double-wake defect
+    corrupts. `_count_comments` is author-agnostic for the same reason.
+    """
+    n = _count_comments(task_id, OVERWATCH_MARKER)
     if n >= OVERWATCH_LIMIT:
         return True, f"{n} overwatch decisions already on this card"
     if (card.get("block_kind") or "") == "cost_cap":
@@ -471,17 +551,26 @@ def _spawn(assessor: str, prompt: str, task_id: str) -> None:
         # and not the other would fix the tool path and leave the CLI path signing the
         # worker — so both carry the assessor.
         env["HERMES_PROFILE_NAME"] = assessor
-        claim = str(_claim_path(task_id))
-        command = "trap 'rm -f -- \"$1\"' EXIT; shift; exec \"$@\""
-        subprocess.Popen(
-            ["/bin/sh", "-c", command, "overwatch", claim, _hermes_bin(), "-p", assessor, "--cli", "chat", "-q", prompt],
+        # The lease is handed over HERE, and the shell wrapper is gone with the trap that never
+        # ran (2026-09-16, t_2da01ffe). The wrapper was
+        #     trap 'rm -f -- "$1"' EXIT; shift; exec "$@"
+        # — `exec` REPLACES the shell, and a shell's EXIT trap does not survive `exec`, so the
+        # claim file was never removed on exit: the wrapper could only ever have protected the
+        # lease for as long as the WORKER lived, and the worker is not the holder. Spawning the
+        # assessor directly makes `Popen.pid` the assessor itself (there is no intermediate
+        # process to name), so the claim can record the process whose lifetime the lease is
+        # actually about. Release is by pid-liveness (`_claim_state`): the claim stops holding
+        # the card the moment that process exits, with CLAIM_TTL_SECONDS as the backstop.
+        proc = subprocess.Popen(
+            [_hermes_bin(), "-p", assessor, "--cli", "chat", "-q", prompt],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True, close_fds=True, env=env,
         )
-        # The shell owns the lease and removes it on normal exit or signal.
-        # A crashed process is recovered by _claim_overwatch on the next tick.
+        _hand_lease_to_child(task_id, int(getattr(proc, "pid", 0) or 0))
         logger.info("kanban-block-escalator: overwatch spawned for %s (%s)", task_id, assessor)
     except Exception as exc:  # noqa: BLE001
+        # A spawn that failed must not strand the card's slot behind a reservation nobody holds.
+        _release_overwatch(task_id)
         logger.warning("kanban-block-escalator: failed to spawn overwatch for %s: %s", task_id, exc)
 
 
