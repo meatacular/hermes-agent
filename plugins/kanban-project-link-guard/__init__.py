@@ -48,14 +48,11 @@ def explicit_project(args: Any) -> Optional[str]:
 
 
 def resolves(value: str) -> bool:
-    """True when *value* names a project in the ACTIVE PROFILE's ``projects.db``.
+    """True when *value* names a project in the active store or fleet tenant map.
 
-    This is the whole of ``_resolve_project_link``'s lookup for the explicit case, and
-    it is sufficient: on the tool path ``project_source_task_id`` is only ever set when
-    the caller passed NO project at all (``kanban_tools._handle_create``), so an
-    explicitly supplied value has no other way to resolve. A guard that disagreed with
-    the kernel here would refuse cards the kernel accepts — which is worse than the
-    defect it prevents.
+    Lookup order mirrors ``_resolve_project_link``: the active profile's store, then the
+    fleet tenant map. A guard that disagreed with the kernel here would refuse cards the
+    kernel accepts — which is worse than the defect it prevents.
 
     Fails OPEN: if the store cannot be read, the answer is "resolved" and the card is
     minted exactly as it is today.
@@ -64,7 +61,11 @@ def resolves(value: str) -> bool:
         from hermes_cli import projects_db as _pdb
 
         with _pdb.connect_closing() as conn:
-            return _pdb.get_project(conn, value) is not None
+            if _pdb.get_project(conn, value) is not None:
+                return True
+        from hermes_cli.kanban_db import _tenant_project_by_id
+
+        return _tenant_project_by_id(value) is not None
     except Exception:  # noqa: BLE001 -- never a crash surface, never a false refusal
         logger.debug("kanban-project-link-guard: project store unreadable, allowing", exc_info=True)
         return True

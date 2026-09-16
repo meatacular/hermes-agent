@@ -1158,6 +1158,10 @@ def _resolve_project_link(
         if project_obj is not None and workspace_kind == "scratch":
             workspace_kind = "worktree"
     if project_obj is None:
+        project_obj = _tenant_project_by_id(project_id)
+        if project_obj is not None and workspace_kind == "scratch":
+            workspace_kind = "worktree"
+    if project_obj is None:
         if explicit:
             raise ProjectLinkError(f"project {project_id!r} could not be resolved")
         # Unresolvable inherited id/slug: drop the link and create an ordinary

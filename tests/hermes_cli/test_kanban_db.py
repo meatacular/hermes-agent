@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import shutil
 import sqlite3
@@ -116,6 +117,35 @@ def test_ac2_stale_board_project_remains_permissive(kanban_home):
         task_id = kb.create_task(conn, title="inherit stale", board="default")
         task = kb.get_task(conn, task_id)
         assert (task.workspace_kind, task.project_id) == ("scratch", None)
+
+
+def test_ac2_board_project_falls_back_to_fleet_tenant_map(kanban_home, tmp_path, monkeypatch):
+    repo = tmp_path / "tenant-repo"
+    _init_git_repo(repo)
+    project_id = "p_tenant_fallback"
+    tenants = kanban_home / "kanban-tenants.json"
+    tenants.write_text(json.dumps({"backupbrain": {
+        "id": project_id, "slug": "backupbrain", "name": "BackupBrain",
+        "primary_path": str(repo),
+    }}))
+    monkeypatch.setenv("HERMES_KANBAN_TENANTS", str(tenants))
+    kb.write_board_metadata("default", project_id=project_id)
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="tenant fallback", board="default", workspace_kind="worktree")
+        task = kb.get_task(conn, task_id)
+    assert task is not None
+    assert task.project_id == project_id
+    assert task.workspace_path == str(repo / ".worktrees" / task_id)
+    assert task.branch_name == f"backupbrain/{task_id}-tenant-fallback"
+
+
+def test_ac1_board_project_missing_from_store_and_tenant_map_stays_permissive(kanban_home):
+    kb.write_board_metadata("default", project_id="p_missing_everywhere")
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="missing tenant fallback", board="default", workspace_kind="worktree")
+        task = kb.get_task(conn, task_id)
+    assert task is not None
+    assert (task.project_id, task.workspace_kind) == (None, "worktree")
 
 
 def test_ac3_empty_project_and_resolved_project_keep_existing_semantics(kanban_home, tmp_path):
