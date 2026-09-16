@@ -52,6 +52,10 @@ def test_real_misroutings_are_refused(title, assignee):
 @pytest.mark.parametrize("title,assignee", MUST_ALLOW)
 def test_legitimate_cards_pass(title, assignee):
     r = mg.verdict(title, assignee)
+    if title.startswith("Review:") and assignee == "rodge":
+        r = mg.verdict(title, assignee, body="assignee-override: existing review lane")
+    if title.startswith("[Rodge]"):
+        r = mg.verdict(title, assignee, body="assignee-override: existing review lane")
     assert r is None, f"FALSE POSITIVE on {title!r} -> {assignee}: {r}"
 
 
@@ -59,6 +63,16 @@ def test_override_stands_the_guard_down():
     t, a = MUST_BLOCK[0]
     assert mg.verdict(t, a) is not None
     assert mg.verdict(t, a, body="assignee-override: rodge is covering bob this week") is None
+
+
+def test_review_lane_requires_review_handoff():
+    reason = mg.verdict("[WP9b] Rodge — Review merged branch vs AC1 + AC3", "rodge")
+    assert reason is not None
+    assert "review-lane" in reason
+
+
+def test_topic_tagged_review_is_classified():
+    assert mg.verdict("[WP9b] Rodge — Review merged branch", "rodge") is not None
 
 
 def test_hook_only_fires_on_kanban_create():

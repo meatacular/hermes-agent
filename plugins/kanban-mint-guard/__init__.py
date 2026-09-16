@@ -340,6 +340,10 @@ def verdict(title: str, assignee: str, body: Any = "") -> Optional[str]:
 
     if marker and marker != a:
         return (f"the title names {marker} as the owner but assignee is '{a}'")
+    if lane == "review" and a == "rodge":
+        return ("this review-lane card must come from the implementation card's "
+                "review_requested handoff, so changes-requested verdicts route back "
+                "to the implementer")
     if lane and a in NON_LANE:
         why = {"axel": "axel is WeRoll-business-only and is not a builder",
                "switch": "switch is the switchboard and takes no board work",
