@@ -534,3 +534,180 @@ def test_the_real_card_that_found_this_is_now_read_by_both_rules():
     assert mg._core_approved(body) is False
     assert mg.verdict("platform: the extension-point ladder is prose", "default", body) is not None
 
+
+
+# --- worktree base (2026-09-16, card t_305e022d) -----------------------------
+# A `worktree` card is cut from the repo's CURRENT HEAD; the create path accepts no base ref.
+# Calibrated on the live board: 372 real worktree cards, of which this rule refuses 19 — 17 of
+# them the defect class (three cards committing onto one hand-cut branch, six WP5 cards on one
+# consolidated branch, a card based on an unmerged branch). The narrower reader is the whole
+# point: a naive "an existing branch name appears in the body" rule refuses 90 of those 372,
+# because `main` is also an English word ("<main> element", "do not push to `main`").
+#
+# The tests inject the repo facts, so they never read the host's git or boards.
+
+WT_HEAD = "main"
+WT_REFS = {
+    "main", "staging", "wt/t_296c6855",
+    "backupbrain/t_b6ebc5ec-wp-c4-pre-meeting-briefing-generation-over",
+    "backupbrain/wp5-entity-resolution-consolidated",
+}
+
+
+def _wt(repo="/repo/backupbrain"):
+    return repo
+
+
+def _wt_refs(_repo):
+    return WT_HEAD, set(WT_REFS)
+
+
+def _wt_args(body, **kw):
+    args = {"title": "platform: the thing", "assignee": "bob", "body": body,
+            "workspace_kind": "worktree"}
+    args.update(kw)
+    return args
+
+
+def _wt_conflict(body, **kw):
+    return mg.worktree_base_conflict(_wt_args(body, **kw), resolve_repo=_wt, repo_refs=_wt_refs)
+
+
+# Real bodies, verbatim heads, from the cards this rule was measured against.
+WT_MUST_REFUSE = [
+    ("t_bd86565f declared  ", "Branch: `wt/t_296c6855` (already exists, already has 2 commits'"),
+    ("t_6f4b7880 directive ", "- [ ] Commit on `wt/t_296c6855`: `fleet-watchdogs: add watcher`."),
+    ("t_b264ec8b directive ", "The briefing generation lives on "
+                              "`backupbrain/t_b6ebc5ec-wp-c4-pre-meeting-briefing-generation-over`, not `main`."),
+    ("t_1a5ec739 directive ", "Work on `backupbrain/wp5-entity-resolution-consolidated` (PR #24)."),
+    ("t_9463e540 base      ", "Base branch: staging"),
+    ("origin-namespaced    ", "base: `origin/staging` @ `8000d7a`"),
+    ("t_ecaa3434 own branch", "- Branch: `backupbrain/dnd-restore` off `backupbrain/owner-regression-hotfix`."),
+]
+
+WT_MUST_ALLOW = [
+    ("no citation at all   ", "Implement the digest API. Run `scripts/regress.sh` and report."),
+    ("cites HEAD (declared)", "- Branch: `main`\nDeliver by merging to `main`."),
+    ("cites HEAD (directive)", "Work on `main`. Do not open a new branch."),
+    ("cites HEAD via origin", "base: `origin/main` @ `8000d7a` — first command `git fetch origin`."),
+    # the false-positive surface the narrow reader exists for — all real lines from the corpus
+    ("prose about main     ", "= a 480px column inside the shell's `<main>`. Measured dead space: 586px."),
+    ("negative delivery    ", "- Do not push to `main`/`origin/main` directly. Do not merge to `main`."),
+    ("delivery target      ", "6. Push **`backupbrain/wp7-digest-consolidated`** and open **one PR**."),
+    ("merge into main      ", "- Merge branch `backupbrain/wp5-entity-resolution-consolidated` into `main`."),
+    ("cherry-pick source   ", "2. **Cherry-pick `830c204`** from branch `backupbrain/t_a4668501`."),
+    ("wave table           ", "| `t_3eb013b8` | `backupbrain/t_3eb013b8-wp-c2-capture` @ `96f5d0d` | unified capture |"),
+    ("runbook prose        ", "`t_50533bc1` closed done; the branch `wt/t_d4dd73ee` @ `6b3606c` (OAuth token service)."),
+    ("bare word, not a ref ", "base: the parent commit\nBranch: TBD"),
+    ("shell line           ", "BASE=$(git merge-base HEAD origin/main)\nBASE=http://localhost:$PORT"),
+    ("placeholder          ", "- branch: `<branch>`\n- base: ..."),
+    ("body is None         ", None),
+]
+
+
+@pytest.mark.parametrize("name,body", WT_MUST_REFUSE)
+def test_a_worktree_card_that_must_sit_on_another_branch_is_refused(name, body):
+    assert _wt_conflict(body) is not None, f"{name!r} should have been refused"
+
+
+def test_the_refusal_names_the_branch_and_the_alternative_kind():
+    reason = _wt_conflict("- Branch: `wt/t_296c6855`")
+    assert "'wt/t_296c6855'" in reason
+    assert "'main'" in reason, "the refusal must name the HEAD the card would actually get"
+
+
+def test_the_message_names_the_branch_and_the_dir_remedy():
+    msg = mg._message_for("platform: the thing", "bob", _wt_conflict("- Branch: `wt/t_296c6855`"))
+    assert "`wt/t_296c6855`" in msg, "the offending branch must be named in the message"
+    assert "`workspace_kind='dir'`" in msg
+    assert "workspace_path" in msg
+    assert "kernel change" in msg.lower(), "the forbidden route must be named as forbidden"
+
+
+@pytest.mark.parametrize("name,body", WT_MUST_ALLOW)
+def test_ordinary_worktree_cards_are_accepted(name, body):
+    assert _wt_conflict(body) is None, f"FALSE POSITIVE on {name!r}: {body!r}"
+
+
+def test_only_worktree_cards_are_in_scope():
+    body = "- Branch: `wt/t_296c6855`\n- [ ] Commit on `wt/t_296c6855`."
+    for kind in ("dir", "scratch", None, "DIR "):
+        args = _wt_args(body)
+        args["workspace_kind"] = kind
+        assert mg.worktree_base_conflict(args, resolve_repo=_wt, repo_refs=_wt_refs) is None
+    assert mg.worktree_base_conflict(_wt_args(body), resolve_repo=_wt, repo_refs=_wt_refs) is not None
+
+
+def test_the_rule_fails_open_when_it_cannot_know_the_repo_or_the_head():
+    body = "- Branch: `wt/t_296c6855`"
+    # no repo resolvable (unknown project, no board metadata, ...)
+    assert mg.worktree_base_conflict(_wt_args(body), resolve_repo=lambda a: None,
+                                     repo_refs=_wt_refs) is None
+    # detached HEAD / unreadable repo
+    assert mg.worktree_base_conflict(_wt_args(body), resolve_repo=_wt,
+                                     repo_refs=lambda r: (None, set())) is None
+    # no body / garbage args
+    assert mg.worktree_base_conflict(_wt_args(""), resolve_repo=_wt, repo_refs=_wt_refs) is None
+    assert mg.worktree_base_conflict(None, resolve_repo=_wt, repo_refs=_wt_refs) is None
+    assert mg.worktree_base_conflict({}, resolve_repo=_wt, repo_refs=_wt_refs) is None
+
+
+def test_a_blob_body_citation_is_read_not_skipped():
+    assert mg.branch_citations(b"- Branch: `wt/t_296c6855`") == [
+        ("wt/t_296c6855", "declared", "- Branch: `wt/t_296c6855`")]
+    assert _wt_conflict(b"- Branch: `wt/t_296c6855`") is not None
+    assert mg.branch_citations(b"\xff\xfe not utf8") == []
+
+
+def test_the_worktree_rule_does_not_need_an_assignee_and_is_not_a_routing_hatch():
+    body = "- Branch: `wt/t_296c6855`"
+    # no assignee, no title: the rule is about the DELIVERABLE, so it still fires
+    assert mg.verdict("", "", body, args=_wt_args(body, assignee="")) is not None
+    # ...and `assignee-override:` (a routing hatch) must not wave a wrong base through
+    overridden = f"{body}\nassignee-override: rodge is covering bob"
+    assert mg.verdict("platform: the thing", "rodge", overridden,
+                      args=_wt_args(overridden)) is not None
+
+
+def test_control_the_worktree_rule_is_not_vacuous(monkeypatch):
+    """Neuter the citation reader and watch every refusal in this section stop firing."""
+    monkeypatch.setattr(mg, "branch_citations", lambda body: [])
+    missed = [b for _, b in WT_MUST_REFUSE if _wt_conflict(b) is not None]
+    assert not missed, f"the rule fires from somewhere other than branch_citations: {missed}"
+    monkeypatch.undo()
+    still = [b for _, b in WT_MUST_REFUSE if _wt_conflict(b) is None]
+    assert not still, f"rule is vacuous for: {still}"
+
+
+def test_the_residual_false_positive_is_the_documented_one():
+    """A card that DECLARES the branch it will itself create is refused too.
+
+    At mint time that branch does not exist, so the card is one line of body text from being
+    fine — the message names the three ways forward. Reading declarations only when the ref
+    exists today would have dropped four of the seven true positives above, which are cards
+    whose branch was merged and deleted after they ran. That trade is deliberate.
+    """
+    body = "- Branch: `backupbrain/p0-digest-content-pipeline-consolidated`."
+    assert mg.branch_citations(body) == [
+        ("backupbrain/p0-digest-content-pipeline-consolidated", "declared", body)]
+    assert _wt_conflict(body) is not None
+
+
+def test_the_hook_refuses_a_worktree_card_on_the_wrong_base(monkeypatch):
+    monkeypatch.setattr(mg, "worktree_repo_for", _wt)
+    monkeypatch.setattr(mg, "_repo_head_and_refs", _wt_refs)
+    out = mg.on_pre_tool_call(tool_name="kanban_create", args=_wt_args(
+        "**Base your branch on the approved briefing work, not `main`.** The briefing generation "
+        "lives on `backupbrain/t_b6ebc5ec-wp-c4-pre-meeting-briefing-generation-over`."))
+    assert out and out["action"] == "block"
+    assert "worktree base" in out["message"]
+    assert "`backupbrain/t_b6ebc5ec-wp-c4-pre-meeting-briefing-generation-over`" in out["message"]
+    assert "`main`" in out["message"]
+    # ...and the same body on a `dir` card is minted unchanged (AC4)
+    ok = mg.on_pre_tool_call(tool_name="kanban_create",
+                             args=_wt_args("Branch: `wt/t_296c6855`", workspace_kind="dir"))
+    assert ok is None
+    # ...and a genuine routing refusal is still a routing refusal, not a worktree message
+    out2 = mg.on_pre_tool_call(tool_name="kanban_create",
+                               args={"title": "Build the thing", "assignee": "rodge"})
+    assert "review lane" in out2["message"] and "worktree base" not in out2["message"]

@@ -55,6 +55,35 @@ description: >-
   multi-value form of SANCTIONED rungs (`soul or skill`) is a card still choosing between
   valid rungs — neither is refused. A body with no marker behaves exactly as before.
 
+  A fifth rule (2026-09-16, card t_305e022d) is about the WORKSPACE, not the assignee: a
+  `worktree` card is cut from the repo's CURRENT HEAD (`_ensure_git_worktree()` runs
+  `git worktree add -b <branch> <target> HEAD`; nothing in the create path takes a base
+  ref), so a card whose work must sit on a sibling branch lands in the wrong tree — the
+  file it was told to edit is absent, or it edits a branch nobody will merge — and nothing
+  errors. Measured 2026-09-16: four cards found by hand (t_75ebec63, t_c827851e,
+  t_331cb549, t_d5cdd9f2), one of which re-authored a page from scratch against a premise
+  that was false on its own base.
+
+    5. a `worktree` card whose body DECLARES a branch (`Branch: …`, `base: …`,
+       `Base branch: …`) or DIRECTS the work onto one ("Work on `…`", "Commit on `…`",
+       "lives on `…`") that is not the resolved repo's current HEAD is refused, with the
+       remedy in the message: `workspace_kind='dir'` pointed at an existing worktree that
+       already carries the branch. `dir` and `scratch` cards are untouched.
+
+  Rule 5 is kept narrow by measurement, not by taste: reading a body for "any existing
+  branch name" refuses 90 of the 372 real worktree cards on this board, because `main` is
+  also an English word ("<main> element", "do not push to `main`"). Read as declarations
+  plus locative directives and replayed through the REAL hook chain, it refuses 44 of those
+  372 — 17 against the card's own project repo (three cards committing onto one hand-cut
+  branch, six WP5 cards on one consolidated branch, cards based on an unmerged branch), and
+  27 whose stored workspace_path names the legacy checkout now parked on `review-wp10`
+  while the body declares `main`/`master` (the guard answers about the args it is given, and
+  the message names the repo it resolved). The 292 dir and 302 scratch rows replayed: rule 5
+  fired on none of them. Its residual false positive is a card that declares the branch it
+  will itself create; the remedy is one line of body text and the message says which. Like
+  the kernel rule, the prose it cannot classify stays a documented gap — the
+  `kanban-worktree-provisioning` skill still carries the manual check.
+
   Fail-open by construction. No title, no assignee, an unknown name, a body it
   cannot read, or any exception at all -> the card is created. A guard that guesses
   is worse than no guard, and refusing to mint is how a board stops entirely.

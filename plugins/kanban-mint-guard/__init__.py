@@ -11,11 +11,17 @@ no merge surface at all and cannot be broken by upstream moving a symbol.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
+import sqlite3
+import subprocess
+from pathlib import Path
 from typing import Any, Dict, Optional
 
-__all__ = ["register", "on_pre_tool_call", "verdict", "declared_extension_point"]
+__all__ = ["register", "on_pre_tool_call", "verdict", "declared_extension_point",
+           "branch_citations", "worktree_base_conflict"]
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +304,299 @@ def _assignee_is_phantom(assignee) -> bool:
         return False
 
 
-def verdict(title: str, assignee: str, body: Any = "") -> Optional[str]:
+# --- worktree base (2026-09-16, card t_305e022d) -----------------------------
+# A `worktree` card's base is the primary repo's CURRENT HEAD. Nothing in the create path
+# accepts a base ref — `hermes_cli/kanban_db_workspace._ensure_git_worktree()` runs
+# `git worktree add -b <branch> <target> HEAD` and `grep base_ref|base_branch|start_point`
+# over kanban_db_workspace.py / kanban_db.py / tools/kanban_tools_schemas.py is empty. So a card
+# whose work must sit on a sibling branch lands in a tree cut from HEAD: the file it was told to
+# edit is absent, or it edits a branch nobody will merge, and NOTHING ERRORS. Measured on
+# 2026-09-16 — four cards found by hand (t_75ebec63 on `main` needing PR #48's branch;
+# t_c827851e needing backend/app/orgagent/briefing.py, absent from `main` entirely; t_331cb549
+# flagged by the PM; t_d5cdd9f2 whose ACs named a file not on its own branch, making them
+# unsatisfiable by construction). Each cost a stalled card, a hand diagnosis and a body edit.
+#
+# The remedy is a different WORKSPACE KIND, not a patch: `workspace_kind='dir'` pointed at an
+# existing worktree that already carries the target branch. This rule refuses the mint and says so.
+#
+# WHY THE CITATION READER IS NARROW (measured, not guessed — the same reason the kernel rule is
+# narrow). Read naively — "does an existing branch name appear in the body?" — the rule refuses
+# 90 of the 372 real worktree cards on this board, because `main` is both a branch and an English
+# word: "`<main>` element", "do not push to `main`", "base `main` @ 8000d7a". Prose cannot be
+# classified safely, so this reads only two shapes:
+#   (a) DECLARED  — a line where the author names the branch: `Branch: wt/t_296c6855`,
+#                   `base: origin/main`, `Base branch: design-system-adoption`. A deliberate
+#                   marker, the same class of mechanism as `extension-point:`.
+#   (b) DIRECTIVE — a line putting the work ON a branch: "Work on `backupbrain/wp5-...`",
+#                   "Commit on `wt/t_296c6855`", "the briefing generation lives on `...`".
+# Measured through the REAL hook chain over all 372 worktree rows (evidence_wt_base.txt,
+# 2026-09-16): 44 refused, none of them for the shapes above — 17 against the card's own project
+# repo (14 in backupbrain @ `main`, 3 in hermes-agent @ `fleet`: three cards committing onto one
+# hand-cut branch, six WP5 cards on one consolidated branch, cards based on an unmerged branch),
+# and 27 whose stored `workspace_path` names the legacy checkout now parked on `review-wp10`
+# while the body declares `main`/`master` — the guard answers about the args it is given, and the
+# message names the repo it resolved. dir (292) and scratch (302) rows replayed: rule 5 fired on
+# none of them. The residual false positive — a card that DECLARES the branch it will itself
+# CREATE — is documented and pinned in the test file; the remedy is one line of body text, and
+# the message says which.
+#
+# FAIL-OPEN, like every other rule here: no marker, no readable body, no resolvable repo, a
+# detached HEAD, a project we cannot resolve, or any exception at all -> the card is created.
+WORKTREE_REASON_PREFIX = "worktree base"
+# The markers an author uses to name the branch the work sits on. `base` alone is included
+# because "base: origin/main" is the fleet's own idiom; a value that is not branch-shaped
+# (`BASE=$(git merge-base ...)`, `BASE=http://localhost:$PORT`) is rejected by _REF_SHAPED.
+WORKTREE_BASE_MARKERS = (r"base[-_ ]?branch", r"base[-_ ]?ref", r"target[-_ ]?branch",
+                         r"branch", r"base")
+WORKTREE_MARKER_LINE = re.compile(
+    r"^[ \t]*(?:[-*+>][ \t]+|\d+[.)][ \t]+|#{1,6}[ \t]+)*"          # bullet / quote / heading
+    r"(?:[*_]{0,2})(?:`)?(?:"
+    + "|".join(WORKTREE_BASE_MARKERS) +
+    r")(?:`)?(?:[*_]{0,2})[ \t]*[:=][ \t]*(?P<v>[^\n]+?)[ \t]*$",
+    re.I)
+# Verbs that put work ONTO a branch, plus the locative connectors. Deliberately NOT the delivery
+# connectors (`to`, `into`, `from`, `off`): "push **`backupbrain/wp7-...`**", "merge branch X
+# into Y", "cherry-pick from branch Z" are delivery/source statements on cards that are correct
+# as worktree cards — measured; they were 5 of the 11 refusals of a wider draft.
+WORKTREE_WORK_VERBS = (r"commit|commits|work|works|deliver|delivered|land|lands|landed|based|"
+                       r"base|branch|branched|cut|lives|live|lived|resides|reside|exists|exist")
+WORKTREE_DIRECTIVE = re.compile(
+    r"\b(" + WORKTREE_WORK_VERBS + r")\b[^\n]{0,40}?\b(on|onto)\b[ \t]*"
+    r"`?(?P<v>[A-Za-z0-9][\w./-]{1,80})`?", re.I)
+# A branch name as git accepts it. Anything with a `$`, `=`, `(`, `:` or a space is a shell line,
+# a URL or prose, not a ref.
+_REF_SHAPED = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+# A namespaced branch (`backupbrain/wp5-x`, `wt/t_296c6855`, `design-system-adoption`) is read as
+# a branch even when no such ref exists yet; a bare single word is only read when it IS a ref, so
+# `base: the parent commit` cannot refuse a card.
+_REF_SEPARATOR = re.compile(r"[/\-_.]")
+_WORKTREE_PLACEHOLDER = re.compile(r"^(?:<[^>]*>|\{[^}]*\}|\.\.\.|…|x|tbd|n/?a|none|same|new|-)$", re.I)
+
+
+def _bare_ref(token: str) -> str:
+    """`origin/main` -> `main`. A remote-tracking ref names the same branch."""
+    t = (token or "").strip().strip("`*_\"'")
+    for prefix in ("origin/", "refs/heads/"):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+    return t
+
+
+def branch_citations(body: Any):
+    """Every ``(token, kind, line)`` branch citation in *body*, in document order.
+
+    ``kind`` is ``"declared"`` (the author named the branch on its own line) or ``"directive"``
+    (a line that puts the work ON a branch). Pure: no filesystem, no git — the caller decides
+    which of these actually name a ref of the repo the card will be provisioned in.
+    """
+    out = []
+    for raw in _text(body).splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = WORKTREE_MARKER_LINE.match(line)
+        if m:
+            token = _declared_value(m.group("v"))
+            if token and _REF_SHAPED.match(token) and not _WORKTREE_PLACEHOLDER.match(token):
+                out.append((token, "declared", line[:110]))
+        for d in WORKTREE_DIRECTIVE.finditer(line):
+            token = (d.group("v") or "").rstrip(".,;:)")
+            if token:
+                out.append((token, "directive", line[:110]))
+    return out
+
+
+def _hermes_root() -> Path:
+    """The FLEET root, not the active profile's: the board is shared across profiles."""
+    for var in ("HERMES_KANBAN_HOME", "HERMES_HOME"):
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            return Path(val).expanduser()
+    return Path.home() / ".hermes"
+
+
+def _board_meta() -> dict:
+    """``board.json`` for the active board, read without importing hermes_cli.
+
+    Mirrors ``kanban_db.kanban_home()/boards_root()``: HERMES_KANBAN_BOARD, else
+    ``<root>/kanban/current``, else ``default``. Absent/unreadable -> {} (fail open). No
+    fallback to ANOTHER board's metadata: the wrong board's default_workdir is a wrong answer.
+    """
+    root = _hermes_root()
+    slug = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    if not slug:
+        try:
+            slug = (root / "kanban" / "current").read_text().strip().splitlines()[0]
+        except Exception:                                   # noqa: BLE001
+            slug = "default"
+    try:
+        return json.loads((root / "kanban" / "boards" / (slug or "default") / "board.json")
+                          .read_text())
+    except Exception:                                       # noqa: BLE001
+        return {}
+
+
+def _project_primary_path(token: Any) -> Optional[str]:
+    """The repo a project id/slug points at, from the projects.db stores, or None.
+
+    Read-only sqlite, stdlib only. The store is per-profile, so both the active profile's and
+    the fleet root's are tried; everything is exception-guarded (fail open).
+    """
+    tok = str(token or "").strip()
+    if not tok:
+        return None
+    root = _hermes_root()
+    seen = []
+    for cand in (Path(os.environ.get("HERMES_HOME") or root) / "projects.db", root / "projects.db"):
+        if cand not in seen:
+            seen.append(cand)
+    for db in seen:
+        if not db.exists():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+            try:
+                row = conn.execute(
+                    "SELECT primary_path FROM projects WHERE (id = ? OR slug = ?) LIMIT 1",
+                    (tok, tok)).fetchone()
+            finally:
+                conn.close()
+            if row and row[0]:
+                return str(row[0])
+        except Exception:                                   # noqa: BLE001
+            continue
+    return None
+
+
+def _git(repo, *args: str) -> Optional[str]:
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                              text=True, timeout=10)
+    except Exception:                                       # noqa: BLE001
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _nearest_existing(path: Path) -> Path:
+    current = path
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
+
+
+def _repo_root_for(path: Path) -> Optional[Path]:
+    """The PRIMARY repo root that a worktree target belongs to (walk up, like the kernel does)."""
+    current = _nearest_existing(path).resolve()
+    while True:
+        common = _git(current, "rev-parse", "--git-common-dir")
+        if common:
+            git_dir = Path(common)
+            if not git_dir.is_absolute():
+                git_dir = (current / git_dir).resolve()
+            return git_dir.parent
+        if current == current.parent:
+            return None
+        current = current.parent
+
+
+def _repo_head_and_refs(repo) -> tuple:
+    """``(head_branch, local_branch_names)``. A detached HEAD returns ``(None, set())``."""
+    root = str(repo)
+    head = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if not head or head == "HEAD":
+        return None, set()
+    out = _git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads") or ""
+    return head, set(name for name in out.splitlines() if name)
+
+
+def worktree_repo_for(args: dict) -> Optional[str]:
+    """The repo a ``worktree`` card will be provisioned in, or None when it cannot be known.
+
+    Resolution mirrors the create path (``kanban_db.create_task``): an explicit
+    ``workspace_path`` wins, else the resolved ``project``'s primary path, else the board's
+    project / ``default_workdir``. An explicit project we cannot resolve returns None rather
+    than falling back to the board's repo — answering about the wrong repo is worse than
+    answering nothing, because that is a refusal on a card that was never at fault.
+    """
+    path = str(args.get("workspace_path") or "").strip()
+    if path:
+        root = _repo_root_for(Path(path).expanduser())
+        return str(root) if root else None
+    project = str(args.get("project") or "").strip()
+    if project:
+        return _project_primary_path(project)
+    meta = _board_meta()
+    return _project_primary_path(meta.get("project_id")) or (meta.get("default_workdir") or None)
+
+
+def worktree_base_conflict(args: Any, resolve_repo=None, repo_refs=None) -> Optional[str]:
+    """Refusal reason for a ``worktree`` card that must sit on a branch other than HEAD.
+
+    ``resolve_repo`` / ``repo_refs`` are the injectable seams the tests use; in production they
+    are :func:`worktree_repo_for` and :func:`_repo_head_and_refs`.
+    """
+    if not isinstance(args, dict):
+        return None
+    if str(args.get("workspace_kind") or "").strip().lower() != "worktree":
+        return None                       # scratch and dir cards are untouched by this rule
+    cites = branch_citations(args.get("body"))
+    if not cites:
+        return None                       # cheap first: a body naming no branch never touches git
+    repo = (resolve_repo or worktree_repo_for)(args)
+    if not repo:
+        return None
+    head, refs = (repo_refs or _repo_head_and_refs)(repo)
+    if not head:
+        return None                       # detached HEAD / unreadable repo — fail open
+    for token, kind, _line in cites:
+        ref = _bare_ref(token)
+        if not ref or ref == head:
+            continue
+        # A DECLARED branch is the author naming the branch by hand, so it is read even when no
+        # such ref exists yet — provided it is shaped like a branch. A DIRECTIVE is prose, so it
+        # is only read when the token is provably a ref of this repo.
+        if kind == "declared" and (ref in refs or _REF_SEPARATOR.search(ref)):
+            pass
+        elif kind == "directive" and ref in refs:
+            pass
+        else:
+            continue
+        return (f"{WORKTREE_REASON_PREFIX}: the body names {ref!r} as the branch this card's "
+                f"work sits on, but a `worktree` card is cut from the repo's current HEAD "
+                f"({head!r} in {repo})")
+    return None
+
+
+def _worktree_message(reason: str) -> str:
+    branch = "that branch"
+    m = re.search(r"the body names '([^']+)'", reason)
+    if m:
+        branch = f"`{m.group(1)}`"
+    return (
+        f"Refusing to mint this card: {reason}.\n\n"
+        "A `worktree` card's base is the primary repo's CURRENT HEAD — nothing in the create "
+        "path accepts a base ref (`_ensure_git_worktree()` runs `git worktree add -b <branch> "
+        "<target> HEAD`). When the work has to sit on a sibling branch, the worker lands in the "
+        "wrong tree: the file it was told to edit is absent, or it edits a branch nobody will "
+        "merge — and NOTHING ERRORS. Four such cards were found by hand on 2026-09-16 "
+        "(t_75ebec63, t_c827851e, t_331cb549, t_d5cdd9f2); one re-authored a page from scratch "
+        "against a premise that was false on its own base.\n\n"
+        "Proceed one of three ways:\n"
+        f"  * the work must sit on {branch} -> mint this card `workspace_kind='dir'` with\n"
+        "    `workspace_path` pointing at an EXISTING worktree that already carries it\n"
+        "    (`git worktree list` finds them; confirm the file the card edits is there first).\n"
+        "    Then say \"commit and push on that branch\" in the body. Nothing else changes.\n"
+        f"  * {branch} does not exist yet and this card is meant to CREATE it -> drop the claim\n"
+        "    from the body (a worktree card already gets its own branch), or mint the card that\n"
+        "    creates the branch first and point this card at it with a `dir` workspace.\n"
+        "  * the work really does belong on HEAD's branch -> delete the line that names\n"
+        f"    {branch}. A body that names no branch is untouched by this rule.\n\n"
+        "Not in scope: accepting a base ref at create (a kernel change — never the fallback), "
+        "or auto-creating worktrees."
+    )
+
+
+def verdict(title: str, assignee: str, body: Any = "", args: Any = None) -> Optional[str]:
     """Pure decision function — unit-tested. Returns a refusal reason, or None."""
     body = _text(body)
     # The kernel rule is about the DELIVERABLE, so it is independent of assignee and runs
@@ -317,6 +615,14 @@ def verdict(title: str, assignee: str, body: Any = "") -> Optional[str]:
         if off:
             return (f"extension-point {off!r} is not one of the five sanctioned seams "
                     f"({' / '.join(EXTENSION_POINTS)})")
+
+    # The workspace base is a property of the DELIVERABLE too, so it is read here, before the
+    # assignee rules and before `assignee-override:` can stand anything down: a cross-lane
+    # routing hatch must not also wave through a card whose tree will be the wrong one.
+    if isinstance(args, dict):
+        base_reason = worktree_base_conflict(args)
+        if base_reason:
+            return base_reason
 
     a = (assignee or "").strip().lower()
     if not a or not (title or "").strip():
@@ -441,6 +747,8 @@ def _message_for(title: str, assignee: str, reason: str) -> str:
     message, which is not what it said. The prefix is the discriminator; the extension rule's
     reason is built to start with it.
     """
+    if reason.startswith(WORKTREE_REASON_PREFIX):
+        return _worktree_message(reason)
     if reason.startswith("extension-point"):
         return _ladder_message(reason)
     if reason.startswith("this review-lane card"):
@@ -458,7 +766,7 @@ def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, str]]:
         title = str(args.get("title") or "")
         assignee = str(args.get("assignee") or "")
         body = str(args.get("body") or "")
-        reason = verdict(title, assignee, body)
+        reason = verdict(title, assignee, body, args=args)
         if not reason:
             return None
         logger.warning("kanban-mint-guard: refusing kanban_create — %s (title=%r assignee=%r)",
