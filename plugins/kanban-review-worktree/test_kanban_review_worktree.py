@@ -46,6 +46,7 @@ def test_ac1_review_claim_uses_sole_implementation_parent(tmp_path, monkeypatch)
         _claimed(conn, "review")
         conn.commit()
 
+    monkeypatch.setattr(plugin, "_branch_present", lambda workspace, branch: True)
     result = plugin.route_review("review")
     assert result["action"] == "routed"
     with sqlite3.connect(db) as conn:

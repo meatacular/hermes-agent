@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
@@ -48,6 +49,18 @@ def _review_parent(conn: sqlite3.Connection, task_id: str) -> Optional[sqlite3.R
     return eligible[0] if len(eligible) == 1 else None
 
 
+def _branch_present(workspace: str, branch: str) -> bool:
+    """Require the reviewed branch to exist locally; never fetch on dispatch."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", workspace, "show-ref", "--verify", f"refs/heads/{branch}"],
+            capture_output=True, text=True, timeout=4, check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def route_review(task_id: str, board: Optional[str] = None) -> dict[str, Any]:
     """Point a claimed review card at its sole eligible implementation parent.
 
@@ -79,6 +92,9 @@ def route_review(task_id: str, board: Optional[str] = None) -> dict[str, Any]:
             parent = _review_parent(conn, task_id)
             if parent is None:
                 verdict["reason"] = "no sole eligible implementation parent"
+                return verdict
+            if not _branch_present(parent["workspace_path"], parent["branch_name"]):
+                verdict["reason"] = "reviewed branch is missing locally"
                 return verdict
             conn.execute(
                 "UPDATE tasks SET workspace_path = ?, branch_name = ? WHERE id = ?",
