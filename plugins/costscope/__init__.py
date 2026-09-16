@@ -46,8 +46,11 @@ def _wrap_session_cost(orig, kdb):
                     total = float(row[0] or 0.0)
                 cap = getattr(kdb, "costscope_cap_equivalent", None)
                 if cap is not None:
-                    extra, _ = cap(conn, where, params)
-                    total += float(extra)
+                    try:
+                        extra, _ = cap(conn, where, params)
+                        total += float(extra)
+                    except Exception as exc:  # optional add-on must not erase base cost
+                        logger.warning("costscope: cap-equivalent unavailable: %s", exc)
                 return total
             finally:
                 conn.close()
