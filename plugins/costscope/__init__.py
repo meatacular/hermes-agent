@@ -54,8 +54,9 @@ def _wrap_session_cost(orig, kdb):
                 return total
             finally:
                 conn.close()
-        except Exception:  # fail-open: ledger errors cannot block enforcement
-            return 0.0
+        except Exception as exc:  # the kernel remains authoritative when scope cannot be computed
+            logger.warning("costscope: scoped read unavailable; deferring to kernel: %s", exc)
+            return orig(state_db_path, prefix_for=prefix_for, task_id=task_id)
     setattr(session_cost, _MARK, True)
     return session_cost
 
