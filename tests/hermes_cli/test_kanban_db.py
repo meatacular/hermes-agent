@@ -20,6 +20,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
+from hermes_cli import projects_db as pdb
 
 
 @pytest.fixture
@@ -41,6 +42,38 @@ def _init_git_repo(repo: Path) -> None:
     (repo / "README.md").write_text("hello\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True, capture_output=True, text=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True, text=True)
+
+
+def test_ac1_explicit_unresolvable_project_is_rejected_without_row(kanban_home):
+    with kbc.connect() as conn:
+        with pytest.raises(kb.ProjectLinkError, match="p_missing"):
+            kb.create_task(conn, title="reject", project_id="p_missing")
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_ac2_stale_board_project_remains_permissive(kanban_home):
+    kb.write_board_metadata("default", project_id="p_stale")
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="inherit stale", board="default")
+        task = kb.get_task(conn, task_id)
+        assert (task.workspace_kind, task.project_id) == ("scratch", None)
+
+
+def test_ac3_empty_project_and_resolved_project_keep_existing_semantics(kanban_home, tmp_path):
+    with kbc.connect() as conn:
+        empty_id = kb.create_task(conn, title="explicit none", project_id="")
+        empty = kb.get_task(conn, empty_id)
+        assert (empty.workspace_kind, empty.project_id) == ("scratch", None)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pdb.connect_closing() as pconn:
+        project_id = pdb.create_project(pconn, name="Resolved", primary_path=str(repo))
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="resolved", project_id=project_id)
+        task = kb.get_task(conn, task_id)
+        assert (task.workspace_kind, task.project_id) == ("worktree", project_id)
+        assert task.workspace_path == str(repo / ".worktrees" / task_id)
 
 
 # ---------------------------------------------------------------------------

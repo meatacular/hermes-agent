@@ -376,32 +376,35 @@ def _cmd_create(args: argparse.Namespace) -> int:
         if max_cost < 0:
             return _err("kanban: max cost must be >= 0", 2)
     _parked: dict = {}
-    with kbc.connect_closing() as conn:
-        task_id = kb.create_task(
-            conn, title=args.title, body=args.body, assignee=args.assignee,
-            created_by=args.created_by or _profile_author(),
-            workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
-            project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
-            parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
-            idempotency_key=getattr(args, "idempotency_key", None),
-            max_runtime_seconds=max_runtime, max_cost=max_cost,
-            skills=getattr(args, "skills", None) or None,
-            max_retries=max_retries, model_override=getattr(args, "model_override", None),
-            provider_override=getattr(args, "provider_override", None),
-            goal_mode=bool(getattr(args, "goal_mode", False)),
-            goal_max_turns=getattr(args, "goal_max_turns", None),
-            completion_contract=getattr(args, "completion_contract", None),
-            # FLEET: --hold creates the card as a real operator_hold block, so
-            # nothing auto-promotes it the moment a parent completes (charter
-            # §5: every job parent and every deploy card is created this way).
-            initial_status=("blocked" if getattr(args, "hold", False)
-                            else getattr(args, "initial_status", "running")),
-            block_kind=("operator_hold" if getattr(args, "hold", False) else None),
-            _assignee_parked=_parked,
-            creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
-                             if is_dispatcher_owned_worker_context() else None),
-        )
-        task = kb.get_task(conn, task_id)
+    try:
+        with kbc.connect_closing() as conn:
+            task_id = kb.create_task(
+                conn, title=args.title, body=args.body, assignee=args.assignee,
+                created_by=args.created_by or _profile_author(),
+                workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
+                project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
+                parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
+                idempotency_key=getattr(args, "idempotency_key", None),
+                max_runtime_seconds=max_runtime, max_cost=max_cost,
+                skills=getattr(args, "skills", None) or None,
+                max_retries=max_retries, model_override=getattr(args, "model_override", None),
+                provider_override=getattr(args, "provider_override", None),
+                goal_mode=bool(getattr(args, "goal_mode", False)),
+                goal_max_turns=getattr(args, "goal_max_turns", None),
+                completion_contract=getattr(args, "completion_contract", None),
+                # FLEET: --hold creates the card as a real operator_hold block, so
+                # nothing auto-promotes it the moment a parent completes (charter
+                # §5: every job parent and every deploy card is created this way).
+                initial_status=("blocked" if getattr(args, "hold", False)
+                                else getattr(args, "initial_status", "running")),
+                block_kind=("operator_hold" if getattr(args, "hold", False) else None),
+                _assignee_parked=_parked,
+                creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
+                                 if is_dispatcher_owned_worker_context() else None),
+            )
+            task = kb.get_task(conn, task_id)
+    except kb.ProjectLinkError as exc:
+        return _err(f"kanban: {exc}", 2)
     if _parked:
         print(
             f"kanban: warning: assignee {_parked.get('assignee')!r} is not a "

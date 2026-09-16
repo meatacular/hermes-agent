@@ -1124,9 +1124,13 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+class ProjectLinkError(ValueError):
+    """Raised when an explicitly requested project cannot be resolved."""
+
+
 def _resolve_project_link(
     conn: sqlite3.Connection, project_id: Optional[str], project_source_task_id: Optional[str],
-    workspace_kind: str, workspace_path: Optional[str],
+    workspace_kind: str, workspace_path: Optional[str], *, explicit: bool = False,
 ) -> tuple[Optional[str], Any, Optional[str], str]:
     """``(project_id, project_obj, project_repo, workspace_kind)`` for ``create_task``.
 
@@ -1154,8 +1158,10 @@ def _resolve_project_link(
         if project_obj is not None and workspace_kind == "scratch":
             workspace_kind = "worktree"
     if project_obj is None:
-        # Unresolvable id/slug: drop the link (never a dangling reference,
-        # never a crash) and create an ordinary scratch task.
+        if explicit:
+            raise ProjectLinkError(f"project {project_id!r} could not be resolved")
+        # Unresolvable inherited id/slug: drop the link and create an ordinary
+        # scratch task, preserving permissive board inheritance.
         return None, None, None, workspace_kind
     # Canonicalise (a slug may have been passed) and anchor the worktree
     # under the project's primary repo.
@@ -1313,6 +1319,7 @@ def create_task(
     # (deterministic worktree + branch) without each surface repeating it.
     # An explicit ``scratch`` (or ``project_id=""``) is a request for no project:
     # it must not be upgraded to a worktree in the board's repo (#106342).
+    project_explicit = bool(str(project_id).strip()) if project_id is not None else False
     if project_id is None and workspace_kind != "scratch":
         try:
             project_id = (_board_meta_for(board).get("project_id") or "").strip() or None
@@ -1338,7 +1345,8 @@ def create_task(
             raise ValueError("max_cost must be >= 0")
 
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
-        conn, project_id, project_source_task_id, workspace_kind, workspace_path
+        conn, project_id, project_source_task_id, workspace_kind, workspace_path,
+        explicit=project_explicit,
     )
 
     # 2026-09-06 (W1): a tenant's code lands in that tenant's repo whoever
