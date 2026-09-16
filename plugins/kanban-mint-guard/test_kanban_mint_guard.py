@@ -4,8 +4,11 @@ The three BLOCK cases are the day's actual defects. The ALLOW cases are every ot
 card of that day — the false-positive calibration. A guard that blocks a legitimate
 card stops the board, which is worse than the defect it prevents.
 """
+import importlib.machinery
 import importlib.util
 import pathlib
+import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -376,16 +379,33 @@ def test_the_card_that_motivated_the_rule_is_now_refused():
     assert r is not None and r.startswith("extension-point"), r
 
 
+T_A525_BODY = (
+    "## Fix (extension point: kernel — hence HELD for Richie, not dispatched)\n"
+    "Primary: sanitize the gate's child environment.\n"
+)
+
+
+def _load_old_reader():
+    with tempfile.TemporaryDirectory() as td:
+        old_path = Path(td) / "old_mint_guard.py"
+        source = subprocess.run(
+            ["git", "show", "67707c39ed3b^:plugins/kanban-mint-guard/__init__.py"],
+            cwd=Path(__file__).parents[2], check=True, capture_output=True, text=True,
+        ).stdout
+        old_path.write_text(source)
+        loader = importlib.machinery.SourceFileLoader("mint_guard_old", str(old_path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        old = importlib.util.module_from_spec(spec)
+        loader.exec_module(old)
+        return old
+
+
 def test_ac1_heading_parenthesis_calibration_and_old_reader_was_red():
     """The real t_a525bc8b declaration was invisible to the pre-change reader."""
-    body = Path("/tmp/t_a525bc8b.body").read_text()
-    old_path = pathlib.Path(__file__).with_name("__init__.py.bak-ladder-heading-parenthesis-20260916")
-    old_source = old_path.read_text()
-    assert "EXTENSION_MARKER_PAREN" not in old_source
-    old_result = None
-    assert old_result is None  # old reader's measured result on the real body
-    assert "EXTENSION_MARKER_PAREN" not in old_source
-    out = mg.verdict("gate defect", "rodge", body)
+    old = _load_old_reader()
+    assert old.declared_extension_point(T_A525_BODY) is None
+    assert mg.declared_extension_point(T_A525_BODY) == "kernel"
+    out = mg.verdict("gate defect", "rodge", T_A525_BODY)
     assert out and "kernel" in out
 
 

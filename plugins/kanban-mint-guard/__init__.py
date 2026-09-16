@@ -199,11 +199,19 @@ def _marker_values(body: Any):
     """Every ``(start, value)`` marker candidate in *body*, in document order."""
     text = _text(body)
     hits = []
+    lines = list(re.finditer(r"(?m)^.*(?:\n|$)", text))
+    fence_positions = [i for i, m in enumerate(lines)
+                       if re.match(r"^[ \t]*```", m.group(0).rstrip("\n"))]
+    paired_fences = set(fence_positions) if len(fence_positions) % 2 == 0 else set(fence_positions[:-1])
+    unmatched_fence = fence_positions[-1] if len(fence_positions) % 2 else None
     fenced = False
-    for line_start, raw in ((m.start(), m.group(0))
-                            for m in re.finditer(r"(?m)^.*(?:\n|$)", text)):
+    for index, match in enumerate(lines):
+        if unmatched_fence is not None and index > unmatched_fence:
+            continue
+
+        line_start, raw = match.start(), match.group(0)
         line = raw.rstrip("\n")
-        if re.match(r"^[ \t]*```", line):
+        if index in paired_fences:
             fenced = not fenced
             continue
         if fenced or re.match(r"^[ \t]*>", line):
@@ -224,13 +232,18 @@ def _marker_values(body: Any):
         if m and line.lstrip().startswith("`"):
             hits.append((line_start + (len(line) - len(line.lstrip())), m.group("v")))
             continue
-        # Preserve the older deliberate inline form when it is a short labelled clause;
-        # reject long explanatory prose (including quoted examples) by bounding the prefix.
-        m = re.search(r"(?P<label>[^`\\n]{0,32})`[ \\t]*extension[-_ ]point[ \\t]*[:=][ \\t]*(?P<v>[^`\\n]+?)[ \\t]*`", line, re.I)
-        if m and (m.group("label").strip().endswith((":", "—")) or
-                   re.match(r"^[ \\t]*(?:[-*+]\\s+)?(?:Held|Fix|Where|Extension point)\\b", line, re.I)):
-            hits.append((line_start + m.start(), m.group("v")))
-            continue
+        # Preserve deliberate inline declarations introduced by a short label. This catches
+        # ``**Held deliberately** (`operator_hold`) ... `extension-point: none of the five` ``
+        # without mining arbitrary prose examples. The label must be at the start of the line,
+        # and the marker must be a code span; a sentence mentioning the marker remains evidence.
+        m = re.search(r"`[ \t]*extension[-_ ]point[ \t]*[:=][ \t]*(?P<v>[^`\n]+?)[ \t]*`", line, re.I)
+        if m:
+            prefix = line[:m.start()].strip()
+            prefix = re.sub(r"^(?:[-*+][ \t]+|#{1,6}[ \t]+)?", "", prefix)
+            label = prefix.strip()
+            if re.match(r"^(?:\*\*)?(?:Held|Fix|Where|Extension point)\b", label, re.I):
+                hits.append((line_start + m.start(), m.group("v")))
+                continue
     hits.sort(key=lambda h: h[0])
     return [v for _, v in hits]
 
@@ -643,7 +656,8 @@ def verdict(title: str, assignee: str, body: Any = "", args: Any = None) -> Opti
         off = declared_extension_point(body or "")
         if off:
             return (f"extension-point {off!r} is not one of the five sanctioned seams "
-                    f"({' / '.join(EXTENSION_POINTS)})")
+                    f"({' / '.join(EXTENSION_POINTS)}); read only line-initial markers "
+                    "or short labelled parenthesis/bracket declarations")
 
     # The workspace base is a property of the DELIVERABLE too, so it is read here, before the
     # assignee rules and before `assignee-override:` can stand anything down: a cross-lane
