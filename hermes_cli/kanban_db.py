@@ -5847,7 +5847,7 @@ def enforce_max_cost(
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
 
     rows = conn.execute(
-        "SELECT t.id, t.worker_pid, t.worker_started_at, t.assignee, t.workspace_path, "
+        "SELECT t.id, t.worker_pid, t.assignee, t.workspace_path, "
         "       t.max_cost, t.claim_lock "
         "FROM tasks t "
         "WHERE t.status = 'running' AND t.max_cost IS NOT NULL "
@@ -5875,16 +5875,13 @@ def enforce_max_cost(
 
         tid = row["id"]
         pid = row["worker_pid"]
-        # SIGTERM -> grace -> SIGKILL, the single shared teardown. Upstream #99558:
-        # pass the spawn fingerprint so a recycled PID is never signalled and an
-        # UNVERIFIED live worker is reported as surviving rather than killed.
+        # SIGTERM -> grace -> SIGKILL, the single shared teardown.
         termination = _terminate_reclaimed_worker(
             pid, row["claim_lock"], signal_fn=signal_fn,
-            started_at=_row_get(row, "worker_started_at"),
         )
         sigkill_used = bool(termination.get("sigkill"))
         worker_survived = bool(
-            (termination.get("termination_attempted") or termination.get("signal_refused"))
+            termination.get("termination_attempted")
             and not termination.get("terminated")
         )
         reason = f"cumulative spend ${spend:.2f} exceeded max_cost ${cap:.2f}"

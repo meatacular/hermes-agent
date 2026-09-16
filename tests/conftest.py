@@ -611,7 +611,7 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _neutralize_kanban_assignee_phantom_guard(request, monkeypatch):
+def _neutralize_kanban_assignee_phantom_guard(request):
     """Default kanban test assignees to \"spawnable\" so create-time assignee
     validation doesn't park the suite's synthetic names.
 
@@ -626,16 +626,32 @@ def _neutralize_kanban_assignee_phantom_guard(request, monkeypatch):
     Tests that genuinely assert phantom/unknown-assignee *parking* behaviour
     opt out with ``@pytest.mark.real_assignees`` (mirroring the way
     ``real_memory_guard`` opts out of its neutralizer).
+
+    Uses its OWN MonkeyPatch, not the test's ``monkeypatch`` fixture: a test that
+    calls ``monkeypatch.undo()`` mid-body (upstream's worker-pid fingerprint test
+    does) would otherwise silently re-arm the parking guard and park its next
+    synthetic card in triage (2026-09-16 catch-up).
     """
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        yield from _apply_kanban_assignee_neutralizer(request, monkeypatch)
+    finally:
+        monkeypatch.undo()
+
+
+def _apply_kanban_assignee_neutralizer(request, monkeypatch):
     if request.node.get_closest_marker("real_assignees"):
+        yield
         return
     nodeid = getattr(request.node, "nodeid", "") or ""
     if "kanban" in nodeid:
         try:
             from hermes_cli import profiles as _pf
         except Exception:
+            yield
             return
         monkeypatch.setattr(_pf, "profile_exists", lambda *a, **k: True)
+        yield
         return
     # 2026-09-10 (catch-up merge): upstream tests that drive a card WITHOUT
     # "kanban" in their path were being parked too — `test_busy_wake_admission`
@@ -646,9 +662,11 @@ def _neutralize_kanban_assignee_phantom_guard(request, monkeypatch):
     try:
         from hermes_cli import kanban_db as _kbd
     except Exception:
+        yield
         return
     monkeypatch.setattr(_kbd, "_assignee_is_known", lambda *a, **k: True,
                         raising=False)
+    yield
 
 
 @pytest.fixture(autouse=True)
