@@ -63,8 +63,25 @@ LOG = HERMES_HOME / "logs" / "apply-queue.log"
 
 ITEM_TIMEOUT = int(os.environ.get("APPLY_QUEUE_TIMEOUT", "900"))   # < the scheduler's 3600s SIGKILL
 KERNEL_DIRS = ("hermes_cli/", "tools/", "agent/", "gateway/")
-BUSY = ("running", "ready", "todo", "in_progress")
+# "In flight" means a card that can EXECUTE now: a busy status, or a parked card the kernel's
+# own recompute_ready() could promote on the next tick (every dependency parent terminal, no
+# sticky block). A `todo` card whose parents are not terminal cannot run at all, and counting it
+# is how this gate went inert: on 2026-09-17 the board carried fifteen `todo` cards, every one of
+# them waiting on an operator-held card, so every tick read "15 card(s) in flight" and no armed,
+# approved item could ever land. Measured that day: old predicate 15, new predicate 0, and all
+# fifteen losses are provably non-executing (each has a non-terminal parent).
 # Emptiness is not quiescence — see board_busy().
+BUSY = ("running", "ready", "in_progress")
+BUSY_SQL = (
+    "SELECT COUNT(*) FROM tasks t WHERE t.status IN ('running','ready','in_progress')"
+    " OR (t.status IN ('todo','blocked')"
+    "     AND coalesce(t.block_kind,'') <> 'operator_hold'"
+    "     AND coalesce((SELECT e.kind FROM task_events e WHERE e.task_id = t.id"
+    "                    AND e.kind IN ('blocked','unblocked')"
+    "                   ORDER BY e.id DESC LIMIT 1),'') <> 'blocked'"
+    "     AND NOT EXISTS (SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id"
+    "                      WHERE l.child_id = t.id AND p.status NOT IN ('done','archived')))"
+)
 QUIET_MIN = float(os.environ.get("APPLY_QUEUE_QUIET_MIN", "10"))
 
 
@@ -80,7 +97,8 @@ def board_busy():
     TWO tests, because a zero count is not quiescence. The board reads 0 in the gap between one
     card archiving and its successor minting, so a count-only gate can fire in the middle of a
     live job — the bot-mode containment job of 2026-09-07 hit exactly this and grew the same
-    second test. So: no card in a busy status AND no board event at all for QUIET_MIN minutes.
+    second test. So: no card that can execute NOW (BUSY_SQL — a busy status, or a parked card the
+    kernel could promote on the next tick) AND no board event at all for QUIET_MIN minutes.
 
     An unreadable board is treated as BUSY, never as idle: applying a change blind is the one
     outcome worse than applying it late.
@@ -89,9 +107,7 @@ def board_busy():
         return None, f"{DB} not found"
     try:
         con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
-        n = con.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status IN (%s)" % ",".join("?" * len(BUSY)), BUSY
-        ).fetchone()[0]
+        n = con.execute(BUSY_SQL).fetchone()[0]
         if n:
             con.close()
             return f"{n} card(s) in flight", None
