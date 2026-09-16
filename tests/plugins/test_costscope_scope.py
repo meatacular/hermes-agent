@@ -34,11 +34,11 @@ def test_ac1_shared_workspace_task_scope_excludes_foreign_sessions(tmp_path):
     assert got == 0.0118
 
 
-def test_ac2_dedicated_workspace_without_task_id_keeps_cwd_scope(tmp_path):
+def test_ac2_dedicated_workspace_task_scope_keeps_own_spend(tmp_path):
     db = tmp_path / "state.db"; _ledger(db)
     mod = _load(); mod.install()
-    got = kdb._session_cost_in_db(str(db), prefix_for="/shared", task_id=None)
-    assert got == 4.0618
+    got = kdb._session_cost_in_db(str(db), prefix_for="/dedicated", task_id="t_41d1a273")
+    assert got == 0.0118
 
 
 def test_ac5_negative_control_current_kernel_overmatches_shared_cwd(tmp_path):

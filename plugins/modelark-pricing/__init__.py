@@ -52,13 +52,14 @@ _INSTALLED = False
 
 
 def _ensure_costscope(kdb):
-    if hasattr(kdb, "costscope_predicate"):
-        return
+    if hasattr(kdb, "costscope_predicate") and getattr(kdb._session_cost_in_db, "_costscope_wrapped", False):
+        return False
     path = Path(__file__).resolve().parents[1] / "costscope" / "__init__.py"
     spec = importlib.util.spec_from_file_location("costscope_backend", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.install()
+    return True
 
 
 def fleet_rates() -> dict:
@@ -183,6 +184,7 @@ def modelark_cap_equivalent(task_id: str) -> tuple[float, int]:
         try:
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
             try:
+                _ensure_costscope(kanban_db)
                 where, params = kanban_db.costscope_predicate(task_id=task_id)
                 u, n = cap_equivalent_rows(conn, where, params)
             finally:
@@ -212,15 +214,17 @@ def install() -> list:
             mod.estimate_usage_cost = up.estimate_usage_cost; done.append(modname)
     try:
         from hermes_cli import kanban_db as kdb
-        _ensure_costscope(kdb)
         was_wrapped = getattr(kdb._session_cost_in_db, "_costscope_wrapped", False)
+        scope_installed = _ensure_costscope(kdb)
         # costscope is a sibling backend and owns the one predicate.  In the
         # normal loader it runs in dependency order; keep a clear failure when
         # an isolated import omits it rather than rebuilding its SQL here.
 
         kdb.costscope_cap_equivalent = cap_equivalent_rows
-        if not was_wrapped:
-            done.extend(["_session_cost_in_db", "costscope_cap_equivalent"])
+        if getattr(kdb._session_cost_in_db, "_costscope_wrapped", False):
+            done.append("_session_cost_in_db")
+        if scope_installed:
+            done.append("costscope_cap_equivalent")
         kdb.modelark_cap_equivalent = modelark_cap_equivalent
     except Exception as exc:  # noqa: BLE001
         logger.warning("modelark-pricing: kanban cap seam not installed (%s) — the $1 cap is blind to ModelArk", exc)
