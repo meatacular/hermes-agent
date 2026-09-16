@@ -1,0 +1,12 @@
+name: kanban-review-worktree
+version: 0.1.0
+kind: backend
+provides_hooks:
+  - kanban_task_claimed
+author: WeRoll fleet
+description: >-
+  Routes a worktree review card to its sole implementation parent's reviewed
+  branch and workspace before the dispatcher materialises the reviewer worker.
+  It is fail-open for missing boards, ambiguous parents, non-worktree cards,
+  missing branches and all exceptions. It is separate from retry branch
+  carry-over and leaves first-time worktree, scratch and dir cards untouched.
