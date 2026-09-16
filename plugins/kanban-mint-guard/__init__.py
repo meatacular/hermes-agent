@@ -392,6 +392,16 @@ def _message(title: str, assignee: str, reason: str) -> str:
     )
 
 
+def _review_message(reason: str) -> str:
+    return (
+        f"Refusing to mint this card: {reason}.\n\n"
+        "A standalone review starts outside the review lane, so a changes-requested verdict "
+        "cannot be routed back to an implementer. For a single-card review, request it from "
+        "the implementation card with `kanban_request_review(reviewer='rodge')`. For a "
+        "deliberate branch or wave review, put `assignee-override: <reason>` in the body."
+    )
+
+
 def _ladder_message(reason: str) -> str:
     return (
         f"Refusing to mint this card: {reason}.\n\n"
@@ -433,6 +443,8 @@ def _message_for(title: str, assignee: str, reason: str) -> str:
     """
     if reason.startswith("extension-point"):
         return _ladder_message(reason)
+    if reason.startswith("this review-lane card"):
+        return _review_message(reason)
     if "kernel" in reason:
         return _core_message(reason)
     return _message(title, assignee, reason)

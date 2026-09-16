@@ -25,11 +25,9 @@ MUST_BLOCK = [
 # Every other card minted that day, plus the shapes that must stay legal.
 MUST_ALLOW = [
     ("Build: orgagent module + GET /api/orgagent/health + test", "bob"),
-    ("Review: orgagent PR against AC 1-7", "rodge"),
     ("QA live: AC 3, 4, 5, 6 against the served backend", "steve-o"),
     ("Deploy: squash-merge orgagent PR + restart backend + confirm", "default"),
     ("[Bob] Apply E1 promotion: 300s on axel/switch/global config + restart", "bob"),
-    ("[Rodge] Review E1 promotion manifest: 3-way check on 3 config files", "rodge"),
     ("[Steve-o] QA E1 promotion: real-config read + cost sanity", "steve-o"),
     ("Hermes Uplift Spec - decompose into clean, self-contained delivery stages", "jobsy"),
     ("Promote E1 (idle_compact_after_seconds=600) fleet-wide", "jobsy"),
@@ -43,6 +41,11 @@ MUST_ALLOW = [
     ("", "axel"),                                                   # no title
 ]
 
+MUST_ALLOW_WITH_OVERRIDE = [
+    ("Review: orgagent PR against AC 1-7", "rodge"),
+    ("[Rodge] Review E1 promotion manifest: 3-way check on 3 config files", "rodge"),
+]
+
 
 @pytest.mark.parametrize("title,assignee", MUST_BLOCK)
 def test_real_misroutings_are_refused(title, assignee):
@@ -51,12 +54,13 @@ def test_real_misroutings_are_refused(title, assignee):
 
 @pytest.mark.parametrize("title,assignee", MUST_ALLOW)
 def test_legitimate_cards_pass(title, assignee):
-    r = mg.verdict(title, assignee)
-    if title.startswith("Review:") and assignee == "rodge":
-        r = mg.verdict(title, assignee, body="assignee-override: existing review lane")
-    if title.startswith("[Rodge]"):
-        r = mg.verdict(title, assignee, body="assignee-override: existing review lane")
-    assert r is None, f"FALSE POSITIVE on {title!r} -> {assignee}: {r}"
+    assert mg.verdict(title, assignee) is None, f"FALSE POSITIVE on {title!r} -> {assignee}"
+
+
+@pytest.mark.parametrize("title,assignee", MUST_ALLOW_WITH_OVERRIDE)
+def test_review_wave_cards_are_explicitly_allowed_with_override(title, assignee):
+    assert mg.verdict(title, assignee) is not None
+    assert mg.verdict(title, assignee, body="assignee-override: existing review lane") is None
 
 
 def test_override_stands_the_guard_down():
@@ -73,6 +77,19 @@ def test_review_lane_requires_review_handoff():
 
 def test_topic_tagged_review_is_classified():
     assert mg.verdict("[WP9b] Rodge — Review merged branch", "rodge") is not None
+
+
+def test_review_lane_message_names_the_review_handoff():
+    out = mg.on_pre_tool_call(tool_name="kanban_create",
+                              args={"title": "Review merged branch", "assignee": "rodge"})
+    assert out and out["action"] == "block"
+    assert "kanban_request_review(reviewer='rodge')" in out["message"]
+
+
+def test_review_verdict_tools_are_not_intercepted():
+    for tool_name in ("kanban_request_review", "kanban_request_changes", "kanban_complete"):
+        assert mg.on_pre_tool_call(tool_name=tool_name,
+                                   args={"title": "Review merged branch", "assignee": "rodge"}) is None
 
 
 def test_hook_only_fires_on_kanban_create():
