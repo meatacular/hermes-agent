@@ -4,7 +4,15 @@ Detection was already covered by the script's own --selftest (18 cases). These
 cover only what happens when the auditor is allowed to mutate the board, which
 is the part that had never been exercised.
 """
-import importlib.util, json, os, sqlite3, sys, tempfile, time, unittest
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import sqlite3
+import tempfile
+import time
+import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location(
@@ -61,22 +69,21 @@ class ApplyPath(unittest.TestCase):
             "SELECT COUNT(*) n FROM task_comments WHERE task_id=?", (tid,)).fetchone()["n"]
 
     # --- the thing it is for -------------------------------------------------
-    def test_it_blocks_and_comments_a_real_mismatch(self):
+    def test_it_reports_and_comments_a_real_mismatch_without_blocking(self):
         self.add("t_bad")
         acted, refused = amw.apply_actions(self.con, [flag("t_bad")])
         self.assertEqual([c["id"] for c in acted], ["t_bad"])
         self.assertEqual(refused, [])
-        self.assertEqual(self.status_of("t_bad"), "blocked")
+        self.assertEqual(self.status_of("t_bad"), "todo")
         self.assertEqual(self.comments_on("t_bad"), 1)
 
-    def test_the_block_event_is_recorded(self):
+    def test_no_block_event_is_recorded(self):
         self.add("t_bad")
         amw.apply_actions(self.con, [flag("t_bad")])
         row = self.con.execute(
             "SELECT payload FROM task_events WHERE task_id=? AND kind='blocked'",
             ("t_bad",)).fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(json.loads(row["payload"])["by"], "assignee-mismatch-watch")
+        self.assertIsNone(row)
 
     # --- the things it must NOT touch ---------------------------------------
     def test_a_RUNNING_card_is_never_blocked(self):
@@ -147,8 +154,6 @@ class ApplyPath(unittest.TestCase):
     def test_CONTROL_the_default_apply_flag_is_OFF(self):
         """The safe state must be the default: a caller that forgets reports."""
         args = amw.main.__wrapped__ if hasattr(amw.main, "__wrapped__") else None
-        import argparse, io, contextlib
-        ap = argparse.ArgumentParser()
         # re-parse through the real main by calling it with --selftest is wrong;
         # instead assert the module constant and the parser default directly.
         with contextlib.redirect_stdout(io.StringIO()):
@@ -156,7 +161,8 @@ class ApplyPath(unittest.TestCase):
                 amw.main(["--days", "0", "--selftest"])
             except SystemExit:
                 pass
-        src = open(os.path.join(HERE, "assignee-mismatch-watch.py")).read()
+        with open(os.path.join(HERE, "assignee-mismatch-watch.py"), encoding="utf-8") as source_file:
+            src = source_file.read()
         self.assertIn('dest="apply", action="store_true", default=False', src)
 
     def test_NEGATIVE_CONTROL_the_suite_can_go_red(self):
@@ -164,9 +170,9 @@ class ApplyPath(unittest.TestCase):
         harness actually observes writes by writing one and detecting it."""
         self.add("t_probe")
         self.assertEqual(self.status_of("t_probe"), "todo")
-        amw._block(self.con, flag("t_probe"))
+        amw._post_comment(self.con, flag("t_probe"))
         self.con.commit()
-        self.assertEqual(self.status_of("t_probe"), "blocked",
+        self.assertEqual(self.comments_on("t_probe"), 1,
                          "the test harness cannot see a write — every other "
                          "assertion in this file is worthless")
 

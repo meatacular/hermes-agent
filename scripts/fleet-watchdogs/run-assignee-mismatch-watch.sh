@@ -3,8 +3,8 @@
 # batch that was ALIGNED with plugins-not-core and survived the rollback).
 #
 # WRITE MODE, enabled 2026-09-13 after the apply path was proved live:
-#   --apply        comment + block an actionable mis-routed card for Jobsy
-#   --max-apply 3  blast-radius cap: if MORE than 3 cards would be blocked,
+#   --apply        comment an actionable mis-routed card for Jobsy (report-only)
+#   --max-apply 3  blast-radius cap: if MORE than 3 audit comments would be posted,
 #                  it writes NOTHING and reports. Many at once means the
 #                  auditor is wrong, not the board. Do not raise this without
 #                  reading why (BACKLOG 10).
