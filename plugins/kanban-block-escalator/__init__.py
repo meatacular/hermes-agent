@@ -689,9 +689,14 @@ _HERMES_TOKENS = frozenset({"hermes", "hermes_cli"})
 #   last 30 days (`complete_task` x4, `unlink_tasks` x4, `add_comment` x2, `link_tasks`, `unblock_task`)
 BOARD_DB_RE = re.compile(r"kanban\.db\b")
 _SQL_TABLES = r"(?:tasks|task_comments|task_links|task_events|task_runs)"
+# SQLite's conflict clause sits BETWEEN the verb and its target — `INSERT OR IGNORE INTO task_links
+# …`. Without it here the rule missed the one genuine write in the whole 67-clause delta (found by
+# auditing every loss against the corpus, not by reading the two quoted examples): the fleet's own
+# link-restore call of 2026-09-14. A tightening may not lose a write it can plainly see.
+_SQL_CONFLICT = r"(?:\s+OR\s+(?:IGNORE|REPLACE|ABORT|FAIL|ROLLBACK))?"
 SQL_WRITE_RE = re.compile(
-    r"(?:UPDATE\s+" + _SQL_TABLES + r"\s+SET\b"
-    r"|(?:INSERT|REPLACE)\s+INTO\s+" + _SQL_TABLES + r"\b"
+    r"(?:UPDATE" + _SQL_CONFLICT + r"\s+" + _SQL_TABLES + r"\s+SET\b"
+    r"|(?:INSERT|REPLACE)" + _SQL_CONFLICT + r"\s+INTO\s+" + _SQL_TABLES + r"\b"
     r"|DELETE\s+FROM\s+" + _SQL_TABLES + r"\b"
     r"|(?:DROP|ALTER|TRUNCATE)\s+TABLE\s+" + _SQL_TABLES + r"\b)",
     re.IGNORECASE,

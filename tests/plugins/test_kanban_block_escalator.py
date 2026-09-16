@@ -321,6 +321,9 @@ def test_awareness_gate_reads_terminal_writes_as_shapes_not_keywords(monkeypatch
     assert refused("cd ~/.hermes && python3 -m hermes_cli kanban set-cap t_dupcrd 1.50 --reason x")
     assert refused('cd ~/.hermes && sqlite3 kanban.db "UPDATE tasks SET body=\'x\' WHERE id=\'t_dupcrd\'"')
     assert refused('cd ~/.hermes && python3 -c "from hermes_cli import kanban_db as kb; kb.unblock_task(c, \'t_dupcrd\')"')
+    # The ONE genuine write the first tightening lost, found by auditing all 67 delta clauses rather
+    # than trusting the two quoted examples: SQLite's conflict clause sits BETWEEN verb and target.
+    assert refused('cd ~/.hermes && sqlite3 ~/.hermes/kanban.db "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (\'t_dupcrd\',\'t_other01\');"')
     # Controls: a documented command is not a run command, and a commit message is not a write.
     assert not refused('cd ~/.hermes && echo "next time run: hermes kanban unblock t_dupcrd"')
     assert not refused('cd ~/.hermes/hermes-agent && git commit -m "fix(escalator): kanban-block-escalator"')
