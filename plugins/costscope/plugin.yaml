@@ -1,0 +1,7 @@
+name: costscope
+version: 1.0.0
+kind: backend
+author: WeRoll fleet
+description: >-
+  Scopes per-card enforcement cost to that card's sessions while retaining cwd-only
+  reporting behavior for calls without a card id.

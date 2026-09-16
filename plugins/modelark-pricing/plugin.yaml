@@ -1,6 +1,7 @@
 name: modelark-pricing
 version: 2.1.0
 kind: backend
+requires_plugins: [costscope]
 author: WeRoll fleet (Cowork, on Richie's instruction 2026-09-11)
 description: >-
   The BytePlus ModelArk Coding Plan is a flat subscription: its calls report NO cost. Richie
