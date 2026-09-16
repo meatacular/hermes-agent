@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any, Dict, Optional
 
-__all__ = ["register", "on_pre_tool_call", "verdict"]
+__all__ = ["register", "on_pre_tool_call", "verdict", "declared_extension_point"]
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,17 @@ EDIT_VERB_LINE = re.compile(
     r"(" + "|".join(EDIT_VERBS) + r")\b", re.I)
 NEGATION = re.compile(r"\b(do not|don'?t|never|must not|without|rather than|instead of|no code lands)\b", re.I)
 CORE_OVERRIDE = "core-patch-approved:"
+# The escape hatch must name WHO approved the change. Until 2026-09-16 the test was a bare
+# substring, so a body that merely QUOTED the placeholder — `core-patch-approved: <who>`, which
+# is how this rule's refusal message and its own card write it — switched BOTH this rule and the
+# extension-point rule off. Measured on t_05a5883c: the card documenting the hatch was the card
+# that bypassed it. A placeholder is not an approval; a name is.
+_CORE_APPROVAL = re.compile(r"core-patch-approved:[ \t]*(?P<who>[^\s`<>{}]+)", re.I)
+
+
+def _core_approved(body: str) -> bool:
+    m = _CORE_APPROVAL.search(body)
+    return bool(m and m.group("who") and not _PLACEHOLDER.match(m.group("who")))
 
 
 def kernel_edit_line(body: str) -> Optional[str]:
@@ -112,6 +123,128 @@ def kernel_edit_line(body: str) -> Optional[str]:
 
 CROSS_LANE_BLOCK = frozenset({"rodge", "steve-o", "karl"})   # a build card on one of these
 OVERRIDE = "assignee-override:"
+
+
+# --- extension-point ladder (2026-09-16, ladder-20260916) --------------------
+# The fifth rule, and the only one that reads a marker the AUTHOR writes on purpose.
+#
+# The ladder — plugin -> watchdog -> skill -> soul -> config, and "if none of the five
+# fits, hand it to Richie; a core patch is never the fallback" — lived only in SOUL prose,
+# so a card could declare a seam that is not on the ladder and be created, decomposed and
+# dispatched like any other. t_331cb549 declared `extension-point: config/kernel` and named
+# hermes_cli/kanban_db.py as its deliverable; it was created, held, released, dispatched,
+# and only the worker's judgement declined the kernel shape.
+#
+# WHY NOT WIDEN THE PROSE RULE INSTEAD (see the note on kernel_edit_line): prose cannot be
+# classified safely. `extension-point: <value>` is a DELIBERATE marker, the same class of
+# mechanism as `core-patch-approved:` and `assignee-override:` — reading it needs no
+# judgement about English.
+#
+# NARROW, in the same way and for the same reason, but not so narrow that it misses the
+# card that motivated it. A marker is read in exactly two forms:
+#   (a) DECLARED at the start of a line (bullet / heading / quote / bold / backticks allowed);
+#   (b) wrapped in INLINE CODE anywhere in a line — `extension-point: config/kernel`.
+# (b) is not a widening of the prose rule: formatting the marker as code is the author saying
+# "this is the marker", which is why t_331cb549's real body reads
+#   "Held: ... work. `extension-point: config/kernel` — `hermes_cli/kanban_db.py`, not code."
+# A BARE mention of the phrase inside a sentence (no backticks, not line-initial) is prose
+# ABOUT the marker and is deliberately not read — that is the false-negative this rule owns,
+# and core-patch-watch is the backstop, exactly as it is for the kernel rule.
+#
+# The residual false positive, accepted and pinned in the test file: a card that QUOTES an
+# off-ladder example in marker form ("a card saying `extension-point: config/kernel` is
+# refused") is refused itself. The cost is one refusal message to an author who is present
+# and can drop the example; the cost of NOT reading form (b) is the card this rule exists for.
+#
+# FAIL-OPEN ON ABSENCE: a body with no marker behaves exactly as it did before, so no
+# existing mint path starts failing.
+EXTENSION_POINTS = ("plugin", "watchdog", "skill", "soul", "config")
+# The value is the FIRST TOKEN after the colon, so a trailing justification on the same line
+# ("extension-point: plugin — a pre_tool_call hook") is not read as part of the value.
+EXTENSION_MARKER_LINE = re.compile(
+    r"^[ \t]*(?:[-*+>][ \t]+|\d+[.)][ \t]+|#{1,6}[ \t]+)*"     # bullet / quote / heading
+    r"(?:[*_]{0,2})(?:`)?extension[-_ ]point(?:`)?(?:[*_]{0,2})[ \t]*[:=][ \t]*"
+    r"(?P<v>[^\n]+?)[ \t]*$",
+    re.I | re.M)
+EXTENSION_MARKER_CODE = re.compile(r"`[ \t]*extension[-_ ]point[ \t]*[:=][ \t]*(?P<v>[^`\n]+?)[ \t]*`",
+                                   re.I)
+# A quoted PLACEHOLDER is an illustration, not a declaration: `extension-point: <value>` is
+# how the ladder itself is written down, and refusing that would refuse the documentation.
+_PLACEHOLDER = re.compile(r"^(?:<[^>]*>|\{[^}]*\}|\.\.\.|…|x)$", re.I)
+# One ladder value, or several joined by a separator ("soul or skill", "plugin|watchdog").
+# The multi-value form is accepted on purpose: self-improvement-review.py already asks for
+# `soul-or-skill`, and a card choosing between two SANCTIONED rungs is not the defect. Every
+# part must still be on the ladder — which is what makes `config/kernel` a refusal.
+_LADDER_SEP = re.compile(r"[-_ ]or[-_ ]|[/|,+]", re.I)
+
+
+def _text(body: Any) -> str:
+    """The body as text. Real rows in kanban.db hold a few BLOB bodies, and a guard that
+    raises on one of those would fail OPEN at the hook — i.e. silently stop guarding."""
+    if isinstance(body, str):
+        return body
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            return bytes(body).decode("utf-8", "replace")
+        except Exception:              # noqa: BLE001
+            return ""
+    return ""
+
+
+def _marker_values(body: Any):
+    """Every ``(start, value)`` marker candidate in *body*, in document order."""
+    text = _text(body)
+    hits = [(m.start(), m.group("v")) for pat in (EXTENSION_MARKER_LINE, EXTENSION_MARKER_CODE)
+            for m in pat.finditer(text)]
+    hits.sort(key=lambda h: h[0])
+    return [v for _, v in hits]
+
+
+def _declared_value(raw: str) -> str:
+    """The declared value from a marker's line remainder, or "" when there is none.
+
+    The backtick case is the one real-world calibration bought: the marker is often written
+    INSIDE a code span, and a card that DEFINES the marker writes
+
+        - `extension-point:` declared, with the chosen seam justified against the alternatives.
+
+    Here the backtick after the colon closes an OUTER span, so the trailing prose is the
+    sentence, not the value. When the remainder starts with a backtick:
+      * a second backtick later  -> the value is what sits between them
+        (`extension-point: `kanban` core ...` -> "kanban");
+      * no second backtick       -> nothing was declared on this line, skip it.
+    Two real cards (t_03560fba, t_da58d620) define the marker exactly this way; reading the
+    prose as the value refused both, which is the false positive this rule least affords.
+    """
+    s = (raw or "").lstrip()
+    if s.startswith("`"):
+        close = s.find("`", 1)
+        if close < 0:
+            return ""
+        s = s[1:close]
+    # The first token that is not pure markup: "** `plugin`" is a bold-wrapped label, and its
+    # value is the second token, not "**".
+    for piece in s.split():
+        piece = piece.strip("`*_\"'")
+        if piece:
+            return piece.rstrip(".,;:)").strip()
+    return ""
+
+
+def declared_extension_point(body: Any) -> Optional[str]:
+    """The first OFF-LADDER declared ``extension-point:`` value in *body*, or None.
+
+    A ladder value, a quoted placeholder and an absent marker all return None.
+    """
+    for raw in _marker_values(body):
+        token = _declared_value(raw)
+        if not token or _PLACEHOLDER.match(token):
+            continue
+        parts = [p.strip("`*_\"'") for p in _LADDER_SEP.split(token) if p.strip()]
+        if parts and all(p.lower() in EXTENSION_POINTS for p in parts):
+            continue                       # a declared, sanctioned seam — not our business
+        return token
+    return None
 
 
 TOPIC_TAG = re.compile(r"^\s*\[(?P<t>[a-z][a-z0-9 ._-]{1,20})\]\s*", re.I)
@@ -165,14 +298,25 @@ def _assignee_is_phantom(assignee) -> bool:
         return False
 
 
-def verdict(title: str, assignee: str, body: str = "") -> Optional[str]:
+def verdict(title: str, assignee: str, body: Any = "") -> Optional[str]:
     """Pure decision function — unit-tested. Returns a refusal reason, or None."""
+    body = _text(body)
     # The kernel rule is about the DELIVERABLE, so it is independent of assignee and runs
     # FIRST — a card minted with no assignee, or an unknown one, must not skip it.
-    if CORE_OVERRIDE not in (body or "").lower():
+    approved = _core_approved(body)
+    if not approved:
         hit = kernel_edit_line(body or "")
         if hit:
             return f"this card instructs a change to upstream's kernel — {hit}"
+        # Same deliverable, DECLARED instead of described: the author's own statement that
+        # they could not find a sanctioned seam. Paired with the rule above, not replacing
+        # it — the verb rule catches what is plainly written, this catches what is declared,
+        # so both "patch kanban_db.py" and "my extension point is the kernel" are covered.
+        # Both stand down on `core-patch-approved:`.
+        off = declared_extension_point(body or "")
+        if off:
+            return (f"extension-point {off!r} is not one of the five sanctioned seams "
+                    f"({' / '.join(EXTENSION_POINTS)})")
 
     a = (assignee or "").strip().lower()
     if not a or not (title or "").strip():
@@ -244,6 +388,52 @@ def _message(title: str, assignee: str, reason: str) -> str:
     )
 
 
+def _ladder_message(reason: str) -> str:
+    return (
+        f"Refusing to mint this card: {reason}.\n\n"
+        "The card DECLARES an extension point, and a declaration off the ladder is the author\n"
+        "saying they could not find a sanctioned seam. That is exactly the case that goes to\n"
+        "Richie instead of onto the board — so it does not get a lane.\n\n"
+        "Every improvement is tried in this order:\n"
+        "  1. plugin    — hermes-agent/plugins/<name>, `kind: backend` so it loads in every\n"
+        "                 profile AND every kanban worker; the hooks are the seam. `pre_tool_call`\n"
+        "                 is the fail-closed one. Zero merge surface if it imports nothing from\n"
+        "                 hermes_cli (see plugins/kanban-mint-guard, plugins/kanban-project-link-guard).\n"
+        "  2. watchdog  — a `no_agent` cron script in scripts/fleet-watchdogs/: zero tokens,\n"
+        "                 silent unless something is wrong (see core-patch-watch.py).\n"
+        "  3. skill     — a SKILL.md on the assignee's profile, attached per card via `skills:`;\n"
+        "                 loaded only for the jobs that need it.\n"
+        "  4. soul      — a dated block. Steering, not enforcement. Net-zero by default: name the\n"
+        "                 line it removes.\n"
+        "  5. config    — a declared key, on EVERY profile (the scoping law).\n\n"
+        "A CORE PATCH IS NEVER THE FALLBACK. It is invisible merge surface and the cost lands on\n"
+        "whoever takes the next upstream catch-up.\n\n"
+        "Proceed one of three ways:\n"
+        "  * re-scope the card to the first rung that fits and declare it: `extension-point: <seam>`;\n"
+        "  * if none of the five fits, take it to Richie and say so in the card — with the reason,\n"
+        "    not a kernel lane. If Richie approves a core change, add `core-patch-approved: <who>`\n"
+        "    and the guard stands down;\n"
+        "  * if that `extension-point:` line was only quoted from the ladder's own wording — or it\n"
+        "    was a placeholder like `<value>` — drop the marker (or make it a ladder value). A body\n"
+        "    with no marker is untouched by this rule."
+    )
+
+
+def _message_for(title: str, assignee: str, reason: str) -> str:
+    """Pick the refusal text by the CLASS of reason, never by a substring of the value.
+
+    `declared_extension_point` returns the raw token, so an off-ladder value spells its own
+    word — `config/kernel` contains "kernel" and would otherwise be answered with the core
+    message, which is not what it said. The prefix is the discriminator; the extension rule's
+    reason is built to start with it.
+    """
+    if reason.startswith("extension-point"):
+        return _ladder_message(reason)
+    if "kernel" in reason:
+        return _core_message(reason)
+    return _message(title, assignee, reason)
+
+
 def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, str]]:
     try:
         if payload.get("tool_name") != "kanban_create":
@@ -257,8 +447,7 @@ def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, str]]:
             return None
         logger.warning("kanban-mint-guard: refusing kanban_create — %s (title=%r assignee=%r)",
                        reason, title[:80], assignee)
-        msg = _core_message(reason) if "kernel" in reason else _message(title, assignee, reason)
-        return {"action": "block", "message": msg}
+        return {"action": "block", "message": _message_for(title, assignee, reason)}
     except Exception:  # noqa: BLE001
         # Never stop a board from minting because this guard had a bad day.
         logger.exception("kanban-mint-guard: unexpected error, allowing")

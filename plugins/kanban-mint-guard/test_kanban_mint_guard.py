@@ -252,3 +252,254 @@ def test_phantom_check_fails_OPEN_when_the_profile_layer_raises(monkeypatch):
 def test_an_empty_assignee_is_not_a_phantom():
     assert mg._assignee_is_phantom("") is False
     assert mg._assignee_is_phantom(None) is False
+
+
+# --- extension-point ladder (2026-09-16, ladder-20260916) ---------------------
+# The ladder lived in SOUL prose only, so a card could declare a seam that is not on it and be
+# dispatched like any other. The case for this rule is one real card, quoted verbatim below.
+#
+# Calibrated the same way as the kernel rule: a case per rung (the false-positive control) and
+# one per refusal. The rungs get FOUR forms each, because the marker is written differently by
+# different authors and a form the rule cannot read is a rung it silently drops.
+
+LADDER_VALUES = ("plugin", "watchdog", "skill", "soul", "config")
+
+
+def _forms(value):
+    return [
+        f"extension-point: {value}",                                            # bare
+        f"`extension-point: {value}` — the hook is the seam",                    # inline code
+        f"- Extension point: `{value}`",                                        # bullet, alias
+        f"**Extension point:** `{value}`",                                      # bold label
+        f"Held: platform card. `extension-point: {value}` — not project code.",  # mid-line
+        f"## Where it goes\n\nExtension point: {value} — justification follows",  # heading ctx
+    ]
+
+
+@pytest.mark.parametrize("value", LADDER_VALUES)
+def test_every_rung_of_the_ladder_is_allowed(value):
+    for form in _forms(value):
+        r = mg.verdict("platform: the thing", "default", form + "\n")
+        assert r is None, f"FALSE POSITIVE on ladder value {value!r} in form {form!r}: {r}"
+
+
+# `config/kernel` is the real one. "kernel"/"core" are the same declaration one word long.
+# Sample size for what the board actually writes: these are the values that appear in card
+# bodies. The value is read as the FIRST TOKEN after the colon (so a trailing justification
+# is never mistaken for part of it), which is also why a spaced form like "config and kernel"
+# is not in this list — it is a value nobody writes, and the first-token rule is documented.
+OFF_LADDER = ("config/kernel", "kernel", "core", "plugin/core", "soul/kernel", "none",
+              "smith", "config+kernel", "watchdog/kernel")
+
+
+@pytest.mark.parametrize("value", OFF_LADDER)
+def test_off_ladder_values_are_refused(value):
+    r = mg.verdict("platform: the thing", "default", f"## Where it goes\n`extension-point: {value}`\n")
+    assert r is not None, f"should have blocked: extension-point: {value}"
+    assert r.startswith("extension-point"), f"wrong rule answered for {value!r}: {r}"
+    assert value.split("/")[0].split("+")[0] in r, f"the refusal must name the value: {r}"
+
+
+LADDER_MUST_ALLOW = [
+    ("no marker at all — the fail-open case every existing card relies on",
+     "Just a plain platform card body. `hermes_cli/kanban_db.py` is mentioned here and there.\n"),
+    ("the marker quoted as a PLACEHOLDER, as the ladder itself is written down",
+     "A card body declaring `extension-point: <value>` where `<value>` is not one of the five.\n"),
+    ("a bare sentence ABOUT the marker, no backticks, not line-initial",
+     "The ladder says the body must declare extension-point: the chosen seam, and justify it.\n"),
+    ("several SANCTIONED rungs joined (self-improvement-review.py asks for this form)",
+     "extension-point: soul-or-skill\n"),
+    ("two sanctioned rungs, slash form", "- `extension-point: plugin|watchdog`\n"),
+    ("a sanctioned rung with a trailing justification", "extension-point: plugin — a pre_tool_call hook.\n"),
+    ("a sanctioned rung, trailing punctuation", "Extension point: config,\n"),
+    ("a sanctioned rung in a blockquote", "> extension-point: skill\n"),
+]
+
+
+@pytest.mark.parametrize("name,body", LADDER_MUST_ALLOW)
+def test_forms_that_must_stay_legal(name, body):
+    r = mg.verdict("platform: the thing", "default", body)
+    assert r is None, f"FALSE POSITIVE on {name}: {r}"
+
+
+# Verbatim tail of the card that motivated the rule (t_331cb549, 2026-09-16). Note what the
+# kernel rule cannot see: nothing here starts with an edit verb, the change is described
+# mid-sentence and the marker is the author's own declaration.
+T331_TAIL = (
+    "`create()` with no `project` and `workspace_kind=\"worktree\"` still inherits the board "
+    "project id where a board declares one (`kanban_db.py:1316`).\n"
+    "4. The CLI reports the same error to a human (not only the tool layer).\n\n"
+    "points-estimate: 3\n\n"
+    "Held: platform-lane defect, Smith's call whether to fix here or fold into the "
+    "routing/mint-guard work. `extension-point: config/kernel` — `hermes_cli/kanban_db.py`, "
+    "not project code.\n"
+)
+
+
+def test_the_card_that_motivated_the_rule_is_now_refused():
+    assert mg.kernel_edit_line(T331_TAIL) is None, "the kernel rule was never able to see this"
+    assert mg.declared_extension_point(T331_TAIL) == "config/kernel"
+    r = mg.verdict("[Smith — HELD] kanban_create silently drops an unresolvable project link",
+                   "default", T331_TAIL)
+    assert r is not None and r.startswith("extension-point"), r
+
+
+def test_core_patch_approved_stands_the_ladder_rule_down():
+    body = T331_TAIL + "\ncore-patch-approved: Richie 2026-09-16\n"
+    assert mg.verdict("platform: the thing", "default", body) is None
+
+
+def test_dropping_the_marker_is_a_real_escape_route():
+    """The prose without the marker mints — this rule is about the DECLARATION, not the subject."""
+    body = T331_TAIL.replace("`extension-point: config/kernel` — `hermes_cli/kanban_db.py`, "
+                             "not project code.", "the seam for this one is the kernel.")
+    assert mg.declared_extension_point(body) is None
+    assert mg.verdict("platform: the thing", "default", body) is None
+
+
+def test_the_residual_false_positive_is_the_documented_one():
+    """A card QUOTING an off-ladder example in marker form is refused itself.
+
+    Pinned deliberately: it is the price of reading the inline-code form at all, and reading
+    that form is what catches t_331cb549. Documented in plugin.yaml, not a surprise. The case
+    below is the REAL line from the rule's own card (t_05a5883c), which quotes the example it
+    exists to refuse — the rule's author's own card is the residual, and that is the honest
+    shape of it.
+    """
+    r = mg.verdict("platform: the extension-point ladder is prose", "default",
+                   "* `extension-point: config/kernel` is a self-declaration that the author "
+                   "could not find a sanctioned seam.\n")
+    assert r is not None and r.startswith("extension-point")
+
+
+def test_a_line_that_DEFINES_the_marker_declares_nothing():
+    """The false positive the 914-card sweep found, verbatim from two real cards.
+
+    Both cards define the marker with an EMPTY value inside the code span, so the backtick after
+    the colon closes an OUTER span and the trailing prose is the sentence, not a value. Reading
+    it as the value refused both cards, which is the false positive this rule least affords.
+    """
+    defining = [
+        "- `extension-point:` declared, with the chosen seam justified against the alternatives "
+        "in the list above.",                                                 # t_03560fba
+        "- `extension-point:` declared and justified against the alternatives.",  # t_da58d620
+        "`extension-point:` — declare it, and do not default to a core patch",
+    ]
+    for line in defining:
+        assert mg.declared_extension_point(line) is None, f"FALSE POSITIVE: {line!r}"
+        assert mg.verdict("platform: the thing", "default", line) is None
+
+    # ...and the same code-span form WITH a value inside it is still read.
+    assert mg.declared_extension_point("`extension-point: skill`") is None
+    assert mg.declared_extension_point("`extension-point: config/kernel`") == "config/kernel"
+
+
+def test_the_hook_refuses_and_says_where_to_go_instead():
+    out = mg.on_pre_tool_call(tool_name="kanban_create",
+                             args={"title": "platform: the thing", "assignee": "default",
+                                   "body": T331_TAIL})
+    assert out and out.get("action") == "block"
+    msg = out["message"]
+    assert "Richie" in msg, "the refusal must say where an off-ladder change goes"
+    for rung in mg.EXTENSION_POINTS:
+        assert rung in msg, f"the ladder in the message is missing {rung!r}"
+    assert "core-patch-approved:" in msg, "the escape hatch must be stated"
+
+
+def test_an_off_ladder_value_is_not_answered_with_the_core_message():
+    """"config/kernel" contains "kernel"; the routing must key on the RULE, not the substring."""
+    out = mg.on_pre_tool_call(tool_name="kanban_create",
+                             args={"title": "platform: the thing", "assignee": "default",
+                                   "body": T331_TAIL})
+    assert "extension point" in out["message"]
+    assert "instructs a change to upstream's kernel" not in out["message"]
+    # ...and the kernel rule still gets its own message.
+    out2 = mg.on_pre_tool_call(tool_name="kanban_create",
+                              args={"title": "Bob — patch archive_task", "assignee": "bob",
+                                    "body": "Patch `archive_task()` in `hermes_cli/kanban_db.py`."})
+    assert "instructs a change to upstream's kernel" in out2["message"]
+
+
+def test_control_the_ladder_rule_is_not_vacuous(monkeypatch):
+    """Neuter the detector and watch every refusal in this section stop firing."""
+    monkeypatch.setattr(mg, "declared_extension_point", lambda body: None)
+    missed = [v for v in OFF_LADDER
+              if mg.verdict("platform: the thing", "default",
+                            f"`extension-point: {v}`") is not None]
+    assert not missed, f"the rule fires from somewhere other than declared_extension_point: {missed}"
+    monkeypatch.undo()
+    still = [v for v in OFF_LADDER
+             if mg.verdict("platform: the thing", "default", f"`extension-point: {v}`") is None]
+    assert not still, f"rule is vacuous for: {still}"
+
+
+def test_the_ladder_rule_fails_open_on_garbage():
+    for body in (None, 0, "", "extension-point:", "extension-point: \n", "extension-point\n"):
+        assert mg.declared_extension_point(body) is None
+        assert mg.verdict("platform: the thing", "default", body) is None
+
+
+def test_a_blob_body_is_read_not_skipped():
+    """kanban.db holds a few BLOB bodies. Raising on one would fail OPEN at the hook — the
+    guard would go quiet on exactly the card it cannot see, which is the worst outcome."""
+    assert mg.declared_extension_point(b"`extension-point: config/kernel`") == "config/kernel"
+    assert mg.verdict("platform: the thing", "default", b"`extension-point: kernel`") is not None
+    assert mg.verdict("platform: the thing", "default", b"`extension-point: plugin`") is None
+    assert mg._text(b"\xff\xfe not utf8") != ""      # never raises
+
+
+def test_the_ladder_and_the_sovereign_vocabulary_agree():
+    """The five rungs are the SOUL's five, in the SOUL's order. Drift here is the whole defect."""
+    assert mg.EXTENSION_POINTS == ("plugin", "watchdog", "skill", "soul", "config")
+
+
+# --- the escape hatch must name someone (2026-09-16) --------------------------
+# Found while verifying this rule, on this rule's own card. `CORE_OVERRIDE in body.lower()` was a
+# bare substring test, so a body that QUOTED the placeholder — `core-patch-approved: <who>`, which
+# is how the refusal message and the card that commissioned this rule both write it — switched BOTH
+# the kernel rule and the ladder rule off. The card documenting the hatch was the card bypassing it.
+
+KERNEL_BODY = "Patch `archive_task()` in `hermes_cli/kanban_db.py` to enforce operator_hold."
+LADDER_BODY = "`extension-point: config/kernel` — hermes_cli/kanban_db.py, not project code."
+
+
+@pytest.mark.parametrize("quoted", [
+    "core-patch-approved: <who>",
+    "core-patch-approved: <who>\n",
+    "See the message: add `core-patch-approved: <who>` and the guard stands down.",
+    "core-patch-approved:",
+    "core-patch-approved:   ",
+    "core-patch-approved: ...",
+])
+def test_quoting_the_escape_hatch_does_not_open_it(quoted):
+    body = f"{KERNEL_BODY}\n\n{quoted}\n"
+    assert mg._core_approved(body) is False, f"a placeholder opened the hatch: {quoted!r}"
+    assert mg.verdict("platform: the thing", "default", body) is not None
+    body2 = f"{LADDER_BODY}\n\n{quoted}\n"
+    r = mg.verdict("platform: the thing", "default", body2)
+    assert r is not None and r.startswith("extension-point")
+
+
+@pytest.mark.parametrize("approval", [
+    "core-patch-approved: Richie 2026-09-16",
+    "core-patch-approved: Richie",
+    "Core-Patch-Approved:  Richie",
+    "core-patch-approved:richie",
+])
+def test_a_named_approval_opens_the_hatch_for_both_rules(approval):
+    assert mg._core_approved(approval) is True
+    assert mg.verdict("platform: the thing", "default", f"{KERNEL_BODY}\n\n{approval}\n") is None
+    assert mg.verdict("platform: the thing", "default", f"{LADDER_BODY}\n\n{approval}\n") is None
+
+
+def test_the_real_card_that_found_this_is_now_read_by_both_rules():
+    """t_05a5883c's own body, verbatim head: it quotes the marker AND the placeholder."""
+    body = (
+        "Proof from today: card t_331cb549 carries `extension-point: config/kernel` and named\n"
+        "`hermes_cli/kanban_db.py` as its deliverable.\n\n"
+        "`core-patch-approved: <who>`. Cards with no `extension-point:` line behave exactly as\n"
+        "they do today.\n"
+    )
+    assert mg._core_approved(body) is False
+    assert mg.verdict("platform: the extension-point ladder is prose", "default", body) is not None
+

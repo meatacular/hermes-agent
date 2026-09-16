@@ -207,7 +207,7 @@ def main():
         "left for Steve-o to confirm, a proof-of-concept plan capped at $1, and the change-manifest id it will "
         "use (charter §12; `python3 ~/.hermes/scripts/change-manifest.py`). One variable per change.\n\n"
         "WHERE THE CHANGE GOES — state this explicitly in every card body as a line "
-        "`extension-point: <plugin|watchdog|soul-or-skill|config>`, and justify it. Upstream's kanban is the "
+        "`extension-point: <plugin|watchdog|skill|soul|config>`, and justify it. Upstream's kanban is the "
         "SUBSTRATE: a card may NOT edit hermes_cli/, tools/, agent/ or gateway/. Take the first of these that "
         "fits: (1) a PLUGIN on an upstream hook — pre_tool_call is the fail-closed one, kind: backend so it "
         "reaches workers (see plugins/kanban-mint-guard); (2) a no_agent WATCHDOG in scripts/ plus a cron entry "

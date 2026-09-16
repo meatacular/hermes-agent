@@ -36,6 +36,25 @@ description: >-
   Escape hatch: put `assignee-override:` anywhere in the card body (with the reason)
   and the guard stands down. Legitimate cross-lane cards exist; they should say so.
 
+  A fourth rule (2026-09-16, ladder-20260916) makes the DECLARED extension point a
+  control. The ladder — plugin -> watchdog -> skill -> soul -> config, and "if none
+  of the five fits, hand it to Richie; a core patch is never the fallback" — was SOUL
+  prose only, so a card could declare a seam off the ladder and be dispatched like any
+  other. Card t_331cb549 declared `extension-point: config/kernel` and named
+  hermes_cli/kanban_db.py as its deliverable; it was created, held, released and
+  dispatched, and only the worker's judgement declined the kernel shape. The existing
+  kernel rule could not see it: that rule wants a line that STARTS with an edit verb,
+  and this body describes the change mid-sentence.
+
+    4. a card body whose own `extension-point:` line names a value outside the five,
+       unless the body also carries `core-patch-approved: <who>`.
+
+  Narrow on purpose, exactly like the kernel rule: the marker must be DECLARED on its
+  own line, so prose ABOUT the marker ("a card declaring `extension-point: config/kernel`
+  is refused") is not read. A quoted placeholder (`<value>`) is documentation, and a
+  multi-value form of SANCTIONED rungs (`soul or skill`) is a card still choosing between
+  valid rungs — neither is refused. A body with no marker behaves exactly as before.
+
   Fail-open by construction. No title, no assignee, an unknown name, a body it
   cannot read, or any exception at all -> the card is created. A guard that guesses
   is worse than no guard, and refusing to mint is how a board stops entirely.
