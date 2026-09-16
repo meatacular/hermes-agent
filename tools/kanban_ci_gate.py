@@ -44,7 +44,8 @@ repo to the gate is a one-line config change, and removing it is the rollback.
 
     "backupbrain": {
       ...
-      "ci_gate": {"check_name": "test-gate", "repo": "meatacular/backupbrain"}
+      "ci_gate": {"check_name": "test-gate", "repo": "meatacular/backupbrain",
+                  "base_ref": "origin/main"}
     }
 
 It also never crashes the run. Closing the run is how work gets lost; a repeat
@@ -91,6 +92,55 @@ def _tenant_ci(tenant: Optional[str]) -> Optional[dict]:
     return cfg
 
 
+def _git(args: list[str], cwd: str, timeout: int = 15) -> tuple[int, str, str]:
+    """Run a read-only git probe; uncertainty keeps the PR gate fail-closed."""
+    try:
+        p = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                           text=True, timeout=timeout)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except FileNotFoundError:
+        return 127, "", "git not found on PATH"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"git timed out after {timeout}s"
+    except Exception as exc:  # noqa: BLE001
+        return 1, "", f"git failed: {exc}"
+
+
+def _branch_carries_no_artifact(workspace: str, base_ref: str) -> Optional[bool]:
+    """Return True only when the branch has no committed artifact of its own.
+
+    Tracked uncommitted files are checked here because completion workers may
+    not load a user-plugin backstop. ``None`` means the comparison failed and
+    callers must retain fail-closed
+    PR enforcement.
+    """
+    rc, head, _ = _git(["rev-parse", "HEAD"], workspace)
+    if rc != 0 or not head:
+        return None
+    rc, base, _ = _git(["rev-parse", base_ref], workspace)
+    if rc != 0 or not base:
+        return None
+    rc, count, _ = _git(["rev-list", "--count", f"{base}..{head}"], workspace)
+    if rc != 0:
+        return None
+    if count == "0":
+        return True
+    rc, _, _ = _git(["diff", "--quiet", f"{base}...{head}"], workspace)
+    if rc == 0:
+        return True
+    if rc == 1:
+        return False
+    return None
+
+
+def _tracked_dirty_count(workspace: str) -> Optional[int]:
+    """Return tracked modified-file count, or None when git status is uncertain."""
+    rc, status, _ = _git(["status", "--porcelain", "--untracked-files=no"], workspace)
+    if rc != 0:
+        return None
+    return sum(1 for line in status.splitlines() if line[:2].strip())
+
+
 def _gh(args: list[str], cwd: str, timeout: int = 45) -> tuple[int, str, str]:
     """Run `gh` with the EXISTING credential (Richie, 09-07: no new PAT).
 
@@ -125,6 +175,19 @@ def evaluate(workspace_path: str, tenant: Optional[str], branch: Optional[str] =
     ws = workspace_path or ""
     if not ws or not os.path.isdir(ws):
         return GateResult(True, reason=f"workspace {ws!r} is not a directory, so no PR can be resolved")
+
+    base_ref = cfg.get("base_ref") or "origin/main"
+    if _branch_carries_no_artifact(ws, base_ref) is True:
+        dirty_count = _tracked_dirty_count(ws)
+        if dirty_count is not None and dirty_count:
+            return GateResult(True, reason=(
+                "this card's branch carries no commit of its own, and its workspace "
+                f"holds {dirty_count} tracked file(s) modified but not committed; "
+                "commit them or open a PR so there is an artifact for CI to verify"))
+        if dirty_count == 0:
+            return GateResult(False, reason=(
+                "this card's branch carries no commit of its own; there is no artifact "
+                "for CI to verify"))
 
     if not branch:
         rc, out, err = _gh(["rev-parse"], ws)  # cheap probe that gh works at all
