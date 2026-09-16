@@ -1285,7 +1285,8 @@ def create_task(
     ``creator_task_id``: inherit durable session/subscriptions independently of
     dependency edges; an explicit ``session_id`` still wins.
     ``project_source_task_id``: cross-profile fallback when ``project_id`` is not
-    in the active profile's projects.db — see ``_resolve_project_link``.
+    in the active profile's projects.db — see ``_resolve_project_link``. An explicitly
+    supplied project that cannot resolve raises ``ProjectLinkError``.
 
     Fleet additions:
     ``max_cost`` caps cumulative worker spend in USD: when the card's session
@@ -1319,7 +1320,13 @@ def create_task(
     # (deterministic worktree + branch) without each surface repeating it.
     # An explicit ``scratch`` (or ``project_id=""``) is a request for no project:
     # it must not be upgraded to a worktree in the board's repo (#106342).
-    project_explicit = bool(str(project_id).strip()) if project_id is not None else False
+    # A source task marks the tool's implicit parent-project inheritance; it is
+    # not an explicit project supplied by the caller.
+    project_explicit = (
+        bool(str(project_id).strip())
+        if project_id is not None and not project_source_task_id
+        else False
+    )
     if project_id is None and workspace_kind != "scratch":
         try:
             project_id = (_board_meta_for(board).get("project_id") or "").strip() or None
@@ -1343,6 +1350,17 @@ def create_task(
             raise ValueError(f"max_cost must be a number, got {max_cost!r}")
         if max_cost < 0:
             raise ValueError("max_cost must be >= 0")
+
+    # Idempotency is checked before project resolution so replaying a request
+    # returns its existing card even if the project later becomes unavailable.
+    if idempotency_key:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? "
+            "AND status != 'archived' "
+            "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
+        ).fetchone()
+        if row:
+            return row["id"]
 
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path,
@@ -1368,16 +1386,6 @@ def create_task(
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
-    # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
-    # race may insert twice, the next lookup stabilises on the newest.
-    if idempotency_key:
-        row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' "
-            "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
-        ).fetchone()
-        if row:
-            return row["id"]
 
     now = int(time.time())
 

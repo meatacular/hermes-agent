@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -44,11 +45,69 @@ def _init_git_repo(repo: Path) -> None:
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True, text=True)
 
 
+def test_ac_cli_unresolvable_project_refuses_without_row(kanban_home):
+    env = os.environ.copy()
+    env.update({"HERMES_HOME": str(kanban_home), "HERMES_KANBAN_DB": str(kanban_home / "kanban.db")})
+    for var in ("HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_KANBAN_TASK"):
+        env.pop(var, None)
+    result = subprocess.run(
+        [shutil.which("hermes") or "hermes", "kanban", "create", "cli probe", "--project", "p_missing", "--assignee", "bob"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr.strip() == "kanban: project 'p_missing' could not be resolved"
+    with kbc.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+    repo = kanban_home / "repo"
+    repo.mkdir()
+    with pdb.connect_closing() as pconn:
+        project_id = pdb.create_project(pconn, name="CLI resolved", primary_path=str(repo))
+    result = subprocess.run(
+        [shutil.which("hermes") or "hermes", "kanban", "create", "cli resolved", "--project", project_id, "--assignee", "bob"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0
+    with kbc.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks WHERE project_id = ?", (project_id,)).fetchone()[0] == 1
+
+
+def test_ac3_explicit_scratch_without_project_remains_permissive(kanban_home):
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="explicit scratch", workspace_kind="scratch")
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        assert (task.workspace_kind, task.project_id) == ("scratch", None)
+
+
 def test_ac1_explicit_unresolvable_project_is_rejected_without_row(kanban_home):
     with kbc.connect() as conn:
         with pytest.raises(kb.ProjectLinkError, match="p_missing"):
             kb.create_task(conn, title="reject", project_id="p_missing")
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_ac1_explicit_unresolvable_project_slug_is_rejected(kanban_home):
+    with kbc.connect() as conn:
+        with pytest.raises(kb.ProjectLinkError, match="missing-slug"):
+            kb.create_task(conn, title="reject slug", project_id="missing-slug")
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_ac2_tool_parent_project_inheritance_remains_permissive(kanban_home):
+    with kbc.connect() as conn:
+        parent_id = kb.create_task(conn, title="parent")
+        conn.execute(
+            "UPDATE tasks SET project_id = ?, workspace_kind = ?, workspace_path = ? WHERE id = ?",
+            ("p_from_parent", "dir", "/noncanonical/parent", parent_id),
+        )
+        child_id = kb.create_task(
+            conn, title="child", project_id="p_from_parent",
+            project_source_task_id=parent_id,
+        )
+        child = kb.get_task(conn, child_id)
+        assert (child.workspace_kind, child.project_id) == ("scratch", None)
 
 
 def test_ac2_stale_board_project_remains_permissive(kanban_home):
