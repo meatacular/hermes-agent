@@ -148,19 +148,11 @@ OVERRIDE = "assignee-override:"
 #
 # NARROW, in the same way and for the same reason, but not so narrow that it misses the
 # card that motivated it. A marker is read in exactly two forms:
-#   (a) DECLARED at the start of a line (bullet / heading / quote / bold / backticks allowed);
-#   (b) wrapped in INLINE CODE anywhere in a line — `extension-point: config/kernel`.
-# (b) is not a widening of the prose rule: formatting the marker as code is the author saying
-# "this is the marker", which is why t_331cb549's real body reads
-#   "Held: ... work. `extension-point: config/kernel` — `hermes_cli/kanban_db.py`, not code."
-# A BARE mention of the phrase inside a sentence (no backticks, not line-initial) is prose
-# ABOUT the marker and is deliberately not read — that is the false-negative this rule owns,
-# and core-patch-watch is the backstop, exactly as it is for the kernel rule.
-#
-# The residual false positive, accepted and pinned in the test file: a card that QUOTES an
-# off-ladder example in marker form ("a card saying `extension-point: config/kernel` is
-# refused") is refused itself. The cost is one refusal message to an author who is present
-# and can drop the example; the cost of NOT reading form (b) is the card this rule exists for.
+#   (a) DECLARED at the start of a line (bullet / heading / bold / backticks allowed);
+#   (b) introduced by a short parenthesised or bracketed label, e.g. ``Fix (extension-point: x)``.
+# A bare mention inside a sentence, including inline code in prose, is evidence ABOUT the marker
+# and is deliberately not read. Fenced blocks and block quotes are evidence too. This keeps the
+# guard from refusing its own documentation while catching deliberate heading declarations.
 #
 # FAIL-OPEN ON ABSENCE: a body with no marker behaves exactly as it did before, so no
 # existing mint path starts failing.
@@ -172,8 +164,14 @@ EXTENSION_MARKER_LINE = re.compile(
     r"(?:[*_]{0,2})(?:`)?extension[-_ ]point(?:`)?(?:[*_]{0,2})[ \t]*[:=][ \t]*"
     r"(?P<v>[^\n]+?)[ \t]*$",
     re.I | re.M)
-EXTENSION_MARKER_CODE = re.compile(r"`[ \t]*extension[-_ ]point[ \t]*[:=][ \t]*(?P<v>[^`\n]+?)[ \t]*`",
-                                   re.I)
+# At most four words in the label before the opening delimiter. Requiring the delimiter before
+# the marker prevents a long prose sentence from qualifying as a declaration.
+EXTENSION_MARKER_PAREN = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]+)?(?:[*_]{0,2}[A-Za-z0-9][\w-]*[*_]{0,2}[ \t]+){0,3}"
+    r"(?:\([^\n()]{0,80}|\[[^\n\[\]]{0,80})[ \t]*"
+    r"extension[-_ ]point[ \t]*[:=][ \t]*(?P<v>[^\n)\]]+)", re.I)
+EXTENSION_MARKER_CODE = re.compile(
+    r"`[ \t]*extension[-_ ]point[ \t]*[:=][ \t]*(?P<v>[^`\n]+?)[ \t]*`", re.I)
 # A quoted PLACEHOLDER is an illustration, not a declaration: `extension-point: <value>` is
 # how the ladder itself is written down, and refusing that would refuse the documentation.
 _PLACEHOLDER = re.compile(r"^(?:<[^>]*>|\{[^}]*\}|\.\.\.|…|x)$", re.I)
@@ -200,8 +198,39 @@ def _text(body: Any) -> str:
 def _marker_values(body: Any):
     """Every ``(start, value)`` marker candidate in *body*, in document order."""
     text = _text(body)
-    hits = [(m.start(), m.group("v")) for pat in (EXTENSION_MARKER_LINE, EXTENSION_MARKER_CODE)
-            for m in pat.finditer(text)]
+    hits = []
+    fenced = False
+    for line_start, raw in ((m.start(), m.group(0))
+                            for m in re.finditer(r"(?m)^.*(?:\n|$)", text)):
+        line = raw.rstrip("\n")
+        if re.match(r"^[ \t]*```", line):
+            fenced = not fenced
+            continue
+        if fenced or re.match(r"^[ \t]*>", line):
+            continue
+        m = EXTENSION_MARKER_LINE.match(line) or EXTENSION_MARKER_PAREN.match(line)
+        if m:
+            hits.append((line_start + m.start(), m.group("v")))
+            continue
+        # Preserve the calibrated labelled form ("Held: ... `extension-point: x`").
+        # A sentence that merely mentions the marker has no short label prefix and stays prose.
+        if re.match(r"^[ \t]*(?:#{1,6}[ \t]+)?[A-Za-z][\w -]{0,24}:[ \t]+", line):
+            m = re.search(r"`[ \t]*extension[-_ ]point[ \t]*[:=][ \t]*(?P<v>[^`\n]+?)[ \t]*`", line, re.I)
+            if m:
+                hits.append((line_start + m.start(), m.group("v")))
+                continue
+        # A code span at the start of a line is a deliberate declaration.
+        m = EXTENSION_MARKER_CODE.match(line.lstrip())
+        if m and line.lstrip().startswith("`"):
+            hits.append((line_start + (len(line) - len(line.lstrip())), m.group("v")))
+            continue
+        # Preserve the older deliberate inline form when it is a short labelled clause;
+        # reject long explanatory prose (including quoted examples) by bounding the prefix.
+        m = re.search(r"(?P<label>[^`\\n]{0,32})`[ \\t]*extension[-_ ]point[ \\t]*[:=][ \\t]*(?P<v>[^`\\n]+?)[ \\t]*`", line, re.I)
+        if m and (m.group("label").strip().endswith((":", "—")) or
+                   re.match(r"^[ \\t]*(?:[-*+]\\s+)?(?:Held|Fix|Where|Extension point)\\b", line, re.I)):
+            hits.append((line_start + m.start(), m.group("v")))
+            continue
     hits.sort(key=lambda h: h[0])
     return [v for _, v in hits]
 

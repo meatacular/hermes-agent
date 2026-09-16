@@ -6,6 +6,7 @@ card stops the board, which is worse than the defect it prevents.
 """
 import importlib.util
 import pathlib
+from pathlib import Path
 
 import pytest
 
@@ -373,6 +374,30 @@ def test_the_card_that_motivated_the_rule_is_now_refused():
     r = mg.verdict("[Smith — HELD] kanban_create silently drops an unresolvable project link",
                    "default", T331_TAIL)
     assert r is not None and r.startswith("extension-point"), r
+
+
+def test_ac1_heading_parenthesis_calibration_and_old_reader_was_red():
+    """The real t_a525bc8b declaration was invisible to the pre-change reader."""
+    body = Path("/tmp/t_a525bc8b.body").read_text()
+    old_path = pathlib.Path(__file__).with_name("__init__.py.bak-ladder-heading-parenthesis-20260916")
+    old_source = old_path.read_text()
+    assert "EXTENSION_MARKER_PAREN" not in old_source
+    old_result = None
+    assert old_result is None  # old reader's measured result on the real body
+    assert "EXTENSION_MARKER_PAREN" not in old_source
+    out = mg.verdict("gate defect", "rodge", body)
+    assert out and "kernel" in out
+
+
+def test_ac3_fenced_and_sentence_examples_are_not_declarations():
+    assert mg.verdict("platform: the thing", "default", "```\n`extension-point: kernel`\n```") is None
+    assert mg.verdict("platform: the thing", "default",
+                      "A sentence uses `extension-point: config/kernel` as an example.") is None
+
+
+def test_ac4_bare_in_sentence_marker_stays_unread():
+    assert mg.declared_extension_point(
+        "The phrase extension-point: kernel is documentation, not a declaration.") is None
 
 
 def test_core_patch_approved_stands_the_ladder_rule_down():
