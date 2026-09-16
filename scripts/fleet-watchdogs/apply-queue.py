@@ -12,7 +12,6 @@ Descriptor::
 
     {"id": "001-thing", "title": "one line for the report",
      "armed": true,                  # false = parked; the drainer ignores it entirely
-     "reason": "why parked",        # optional disarm explanation; why_disarmed/disarmed_why also accepted
      "script": "001-thing.sh",
      "requires_idle_board": true,    # default true
      "requires_clean_tree": false,   # true for anything that commits
@@ -55,6 +54,21 @@ from pathlib import Path
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 if HERMES_HOME.parent.name == "profiles":
     HERMES_HOME = HERMES_HOME.parent.parent
+# 2026-09-16 (Richie): "delay deployment of this work to later tonight … structure so it can be
+# unattended … ensure rollback are used so error risks can be mitigated … more work may be added to
+# the cron across the day." So the drainer keeps its 15-minute tick — a short tick is what lets an
+# urgent item land promptly and what keeps each item re-checking a board that may have moved — but
+# it only DEPLOYS inside a night window. Work queued through the day accumulates and lands while
+# nobody is watching, which is also when the board is quiet and the providers are off-peak.
+#
+# Local time, deliberately: the Mac runs NZ time, `time.localtime()` needs no tz library, and this
+# file is stdlib-only because cron runs it under the system python3 where `import yaml` raises.
+WINDOW_OPEN_H = int(os.environ.get("APPLY_QUEUE_OPEN_H", "22"))    # 22:30 local
+WINDOW_OPEN_M = int(os.environ.get("APPLY_QUEUE_OPEN_M", "30"))
+WINDOW_CLOSE_H = int(os.environ.get("APPLY_QUEUE_CLOSE_H", "5"))   # 05:30 local
+WINDOW_CLOSE_M = int(os.environ.get("APPLY_QUEUE_CLOSE_M", "30"))
+# An item may carry "urgent": true to bypass the window. It is meant for a fix that should not wait
+# a whole day, and it is deliberately a per-item opt-in rather than a global switch.
 QUEUE = HERMES_HOME / "scripts" / "apply-queue"
 STATE = HERMES_HOME / "state" / "apply-queue"
 REPO = HERMES_HOME / "hermes-agent"
@@ -163,6 +177,39 @@ def load_items():
     return out
 
 
+def in_window(now=None) -> bool:
+    """True inside the night deploy window. Handles the wrap over midnight."""
+    t = time.localtime(now if now is not None else time.time())
+    mins = t.tm_hour * 60 + t.tm_min
+    o = WINDOW_OPEN_H * 60 + WINDOW_OPEN_M
+    c = WINDOW_CLOSE_H * 60 + WINDOW_CLOSE_M
+    return (mins >= o or mins < c) if o > c else (o <= mins < c)
+
+
+def rollback(manifest: str) -> tuple:
+    """Reverse an item's change manifest. Returns (ok, one-line summary).
+
+    Why the drainer does this rather than printing the command: an unattended run that fails at
+    02:00 and leaves the change half-applied is exactly the risk this window creates. The manifest
+    already holds a pre-image per file and a git pre/post per repo, so the reversal is mechanical —
+    what was missing was anything CALLING it. `--no-restart` because the drainer never signals a
+    gateway (L3, and the cron running this is what would die); the restart debt stays visible to
+    pre-flight either way.
+    """
+    if not manifest:
+        return False, "no manifest declared — nothing to roll back automatically"
+    script = HERMES_HOME / "scripts" / "change-manifest.py"
+    if not script.is_file():
+        return False, f"change-manifest.py not found at {script}"
+    try:
+        r = subprocess.run([sys.executable, str(script), "rollback", manifest, "--no-restart"],
+                           capture_output=True, text=True, timeout=300)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"rollback raised: {exc}"
+    tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-8:])
+    return r.returncode == 0, tail or f"rc={r.returncode}"
+
+
 def main():
     STATE.mkdir(parents=True, exist_ok=True)
     items = load_items()
@@ -171,11 +218,26 @@ def main():
 
     failed = sorted(p.stem for p in STATE.glob("*.failed"))
     if failed:
-        # Fail-stop. Say it once per tick; the operator clears the marker when the item is fixed.
-        print(f"apply-queue is PARKED: {len(failed)} item(s) failed and were never cleared — "
-              f"{', '.join(failed)}. Nothing else will run until the .failed marker(s) in "
-              f"{STATE} are removed. Detail: {LOG}")
+        # Fail-stop. 2026-09-16: it used to say this EVERY 15 MINUTES, and on 09-14 it did so for
+        # 20 hours straight. A parked queue is not silent and never was — it was noise that blended
+        # in, which is the same failure as silence and harder to see. Once, then hourly.
+        nag = STATE / ".park-notice"
+        last = 0.0
+        try:
+            last = float(json.loads(nag.read_text()).get("at", 0))
+        except Exception:  # noqa: BLE001
+            pass
+        if time.time() - last >= 3600:
+            nag.write_text(json.dumps({"at": time.time(), "failed": failed}))
+            print(f"apply-queue is PARKED: {len(failed)} item(s) failed and were never cleared — "
+                  f"{', '.join(failed)}. Nothing else will run until the .failed marker(s) in "
+                  f"{STATE} are removed. Detail: {LOG}")
         return 0
+    # Queue healthy: forget the nag clock so the next park says so immediately.
+    try:
+        (STATE / ".park-notice").unlink()
+    except FileNotFoundError:
+        pass
 
     pending = [d for d in items
                if not d.get("_broken")
@@ -186,6 +248,15 @@ def main():
         print(f"apply-queue: {d['id']} — {d['_broken']}")
     if not pending:
         return 0
+
+    # The window. Checked AFTER pending is known, so an empty queue is silent at every hour of the
+    # day rather than announcing that it is waiting for a window it has nothing to use.
+    if not in_window() and not any(d.get("urgent") for d in pending):
+        log(f"deferred to the night window ({WINDOW_OPEN_H:02d}:{WINDOW_OPEN_M:02d}–"
+            f"{WINDOW_CLOSE_H:02d}:{WINDOW_CLOSE_M:02d} local): {len(pending)} item(s) waiting — "
+            f"{', '.join(d['id'] for d in pending)}")
+        return 0
+    pending = [d for d in pending if in_window() or d.get("urgent")]
 
     item = pending[0]                                   # ONE per tick, in id order
     iid = item["id"]
@@ -251,9 +322,26 @@ def main():
               + (f"\n  Rollback: fleet-rollback.sh {item['manifest']}" if item.get("manifest") else "")
               + (f"\n{tail}" if tail else ""))
     else:
+        # ROLL BACK, do not merely recommend it. Unattended means nobody reads the recommendation
+        # until morning, and a half-applied change sitting live for six hours is the risk the night
+        # window creates. Failing to roll back is itself recorded and reported loudly.
+        rb_ok, rb_msg = rollback(item.get("manifest"))
+        rec["rollback"] = {"attempted": bool(item.get("manifest")), "ok": rb_ok, "detail": rb_msg}
         (STATE / f"{iid}.failed").write_text(json.dumps(rec, indent=1))
-        print(f"apply-queue: FAILED {iid} — {item.get('title', '')} (rc={rc} after {took:.0f}s). "
-              f"The queue is now PARKED; nothing further runs until "
+        if item.get("manifest") and rb_ok:
+            state_line = (f"ROLLED BACK automatically from manifest {item['manifest']} — the fleet "
+                          f"is as it was before this item ran.")
+        elif item.get("manifest"):
+            state_line = (f"⚠️ ROLLBACK FAILED for manifest {item['manifest']} — the change may be "
+                          f"HALF APPLIED. Run `fleet-rollback.sh {item['manifest']}` and read it. "
+                          f"Detail: {rb_msg}")
+        else:
+            state_line = ("⚠️ No manifest was declared, so nothing could be rolled back "
+                          "automatically. Check what the item changed before re-arming it.")
+        (STATE / f"{iid}.failed").write_text(json.dumps(rec, indent=1))
+        print(f"apply-queue: FAILED {iid} — {item.get('title', '')} (rc={rc} after {took:.0f}s).\n"
+              f"  {state_line}\n"
+              f"  The queue is now PARKED; nothing further runs until "
               f"{STATE / (iid + '.failed')} is removed.\n{tail}")
     return 0
 
