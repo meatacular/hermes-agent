@@ -43,11 +43,7 @@ def _db_path(board: Optional[str]) -> Optional[Path]:
 
 def _review_shaped(args: dict[str, Any]) -> bool:
     title = str(args.get("title") or "").strip().lower()
-    assignee = str(args.get("assignee") or "").strip().lower()
-    return (
-        title.startswith(("review", "re-review", "re review", "[rodge]", "rodge —", "rodge -"))
-        or assignee == "rodge"
-    )
+    return title.startswith(("review", "re-review", "re review", "[rodge]", "rodge —", "rodge -"))
 
 
 def _branch_present(workspace: str, branch: str) -> bool:
@@ -94,7 +90,7 @@ def verdict(args: Any) -> Optional[dict[str, Any]]:
     """Return modified mint arguments, or ``None`` to mint exactly as asked."""
     if not isinstance(args, dict) or not _review_shaped(args):
         return None
-    if "workspace_kind" in args or "workspace_path" in args:
+    if args.get("workspace_kind") is not None or args.get("workspace_path") is not None:
         return None
     parent, reason = _parent_workspace(args.get("board"), args.get("parents"))
     if parent is None:
