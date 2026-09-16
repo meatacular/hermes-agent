@@ -120,10 +120,11 @@ def test_a_resolvable_project_is_allowed_and_still_binds_a_worktree(store):
 
 def test_fleet_tenant_map_project_is_allowed_without_local_store(fresh_home, tmp_path, monkeypatch):
     tenants = fresh_home / "kanban-tenants.json"
+    monkeypatch.setenv("HERMES_KANBAN_TENANTS", str(tenants))
+    assert plg.resolves("p_tenant") is False
     tenants.write_text(__import__("json").dumps({"backupbrain": {
         "id": "p_tenant", "slug": "backupbrain", "primary_path": str(tmp_path / "repo"),
     }}))
-    monkeypatch.setenv("HERMES_KANBAN_TENANTS", str(tenants))
     assert plg.resolves("p_tenant") is True
     assert plg.verdict({"project": "p_tenant"}) is None
 

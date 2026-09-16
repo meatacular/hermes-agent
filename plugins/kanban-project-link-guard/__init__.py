@@ -8,11 +8,11 @@ Contract (``hermes_cli/plugins.py``):
     ``{"action": "block", "message": "..."}`` -> tool call refused
     ``None``                                   -> allowed
 
-Imports NOTHING from ``hermes_cli`` at import time. The one store read is a narrow,
-lazy, exception-guarded call to ``projects_db.get_project`` — the SAME single stable
-function the kernel calls, which is what makes this guard decision-exact rather than
-a second opinion. It is the same shape ``kanban-mint-guard`` already uses for
-``profiles.profile_exists``.
+Imports NOTHING from ``hermes_cli`` at import time. Resolution is deliberately
+decision-exact with the kernel: it checks the active profile's store first, then
+the fleet tenant map through the kernel's private ``_tenant_project_by_id`` helper.
+The second lookup is a deliberate coupling to that kernel resolver; failures remain
+fail-open, but are logged visibly rather than silently allowing every value.
 """
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def resolves(value: str) -> bool:
 
         return _tenant_project_by_id(value) is not None
     except Exception:  # noqa: BLE001 -- never a crash surface, never a false refusal
-        logger.debug("kanban-project-link-guard: project store unreadable, allowing", exc_info=True)
+        logger.warning("kanban-project-link-guard: project resolution unavailable, allowing", exc_info=True)
         return True
 
 
