@@ -12,6 +12,7 @@ Descriptor::
 
     {"id": "001-thing", "title": "one line for the report",
      "armed": true,                  # false = parked; the drainer ignores it entirely
+     "reason": "why parked",        # optional disarm explanation; why_disarmed/disarmed_why also accepted
      "script": "001-thing.sh",
      "requires_idle_board": true,    # default true
      "requires_clean_tree": false,   # true for anything that commits

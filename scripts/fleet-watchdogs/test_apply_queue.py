@@ -1,6 +1,7 @@
 """Hermetic tests for the drainer. Every positive paired with a control."""
 import json, os, pathlib, sqlite3, subprocess, sys, tempfile
-DRAINER = os.path.expanduser("~/mnt/.hermes/scripts/apply-queue.py")
+DRAINER = os.path.expanduser("~/.hermes/scripts/apply-queue.py")
+ARMER = os.path.expanduser("~/.hermes/scripts/nightly-arm-20260916.sh")
 fails = []
 def ck(name, cond, d=""):
     print(("  PASS  " if cond else "  FAIL  ") + name + (f"   {d}" if not cond else "")); 
@@ -29,6 +30,20 @@ def run(h):
     e = dict(os.environ); e["HERMES_HOME"] = str(h)
     r = subprocess.run([sys.executable, DRAINER], capture_output=True, text=True, env=e)
     return r.stdout.strip()
+
+def run_armer(h):
+    e = dict(os.environ); e["HOME"] = str(h)
+    r = subprocess.run([ARMER], capture_output=True, text=True, env=e)
+    log = h/".hermes"/"logs"/"nightly-arm.log"
+    return (r.stdout + (log.read_text() if log.exists() else "")).strip()
+
+def parked_descriptor(h, iid, field):
+    h = h/".hermes"
+    q = h/"scripts"/"apply-queue"; q.mkdir(parents=True, exist_ok=True)
+    (h/"state"/"apply-queue").mkdir(parents=True, exist_ok=True)
+    (h/"logs").mkdir(parents=True, exist_ok=True)
+    d = {"id": iid, "armed": False, field: "deliberately parked for proof"}
+    (q/f"{iid}.json").write_text(json.dumps(d))
 
 with tempfile.TemporaryDirectory() as t:
     h = home(pathlib.Path(t)/"a"); item(h, "001-ok")
@@ -80,6 +95,24 @@ with tempfile.TemporaryDirectory() as t:
 with tempfile.TemporaryDirectory() as t:
     h = home(pathlib.Path(t)/"h")
     ck("CONTROL: empty queue is silent", run(h) == "")
+
+for field in ("reason", "why_disarmed", "disarmed_why"):
+    with tempfile.TemporaryDirectory() as t:
+        h = pathlib.Path(t)/"arm"
+        parked_descriptor(h, "001-parked", field)
+        out = run_armer(h)
+        d = json.loads((h/".hermes"/"scripts"/"apply-queue"/"001-parked.json").read_text())
+        ck(f"AC1/2: armer respects {field}", not d["armed"], out)
+        ck(f"  ...logs deliberate {field}",
+           "left disarmed (deliberate): 001-parked" in out, out)
+
+with tempfile.TemporaryDirectory() as t:
+    h = pathlib.Path(t)/"arm-control"
+    parked_descriptor(h, "001-unexplained", "title")
+    p = h/".hermes"/"scripts"/"apply-queue"/"001-unexplained.json"
+    d = json.loads(p.read_text()); d.pop("title"); p.write_text(json.dumps(d))
+    out = run_armer(h)
+    ck("CONTROL: armer arms an unexplained parked item", json.loads(p.read_text())["armed"], out)
 
 print()
 print("ALL PASS" if not fails else f"FAILURES: {fails}")
