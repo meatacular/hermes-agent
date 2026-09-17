@@ -828,14 +828,14 @@ def test_review_card_at_the_live_platform_checkout_is_allowed(tmp_path, monkeypa
 
 def test_second_build_card_at_a_shared_dir_is_refused(tmp_path):
     d = tmp_path / "shared"; d.mkdir(); (d / "f").write_text("x")
-    rows = [("t_aaaa0001", "[build] first thing")]
-    r = mg.dir_workspace_conflict(_dir_args(str(d), title="[build] second thing"), repo_root_for=lambda p: p, board_reader=lambda path: rows)
+    rows = [("t_aaaa0001", "[build] implement the first thing")]
+    r = mg.dir_workspace_conflict(_dir_args(str(d), title="[build] implement the second thing"), repo_root_for=lambda p: p, board_reader=lambda path: rows)
     assert r and "already carries a build-lane card in flight" in r and "t_aaaa0001" in r
 
 
 def test_shared_dir_rule_ignores_non_build_neighbours_and_fails_open(tmp_path):
     d = tmp_path / "shared"; d.mkdir(); (d / "f").write_text("x")
-    assert mg.dir_workspace_conflict(_dir_args(str(d), title="[build] x"), repo_root_for=lambda p: p, board_reader=lambda path: [("t_1", "[Rodge] review y")]) is None
-    assert mg.dir_workspace_conflict(_dir_args(str(d), title="[Verify] x"), repo_root_for=lambda p: p, board_reader=lambda path: [("t_1", "[build] y")]) is None
+    assert mg.dir_workspace_conflict(_dir_args(str(d), title="[build] implement x"), repo_root_for=lambda p: p, board_reader=lambda path: [("t_1", "[Rodge] review y")]) is None
+    assert mg.dir_workspace_conflict(_dir_args(str(d), title="[Verify] x"), repo_root_for=lambda p: p, board_reader=lambda path: [("t_1", "[build] implement y")]) is None
     def boom(path): raise RuntimeError("board unreadable")
-    assert mg.dir_workspace_conflict(_dir_args(str(d), title="[build] x"), repo_root_for=lambda p: p, board_reader=boom) is None
+    assert mg.dir_workspace_conflict(_dir_args(str(d), title="[build] implement x"), repo_root_for=lambda p: p, board_reader=boom) is None
