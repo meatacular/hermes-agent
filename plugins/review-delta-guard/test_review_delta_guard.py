@@ -70,6 +70,9 @@ def card(repo, monkeypatch):
     info = {"id": "t_8dd715c6", "workspace": str(repo), "workspace_kind": "worktree",
             "assignee": "rodge", "run_id": 1821}
     monkeypatch.setattr(plg, "resolve_card", lambda args: dict(info))
+    # The verdict-landed check (run 1821 must have landed as changes_requested on the board);
+    # there is no board here, so the read is stubbed the way resolve_card is.
+    monkeypatch.setattr(plg, "run_outcome", lambda run_id: "changes_requested")
     return info
 
 

@@ -379,13 +379,13 @@ def _ledger(root, prof, rows):
     d.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(d / "state.db")
     c.execute("CREATE TABLE IF NOT EXISTS session_model_usage (session_id TEXT, model TEXT, provider_name TEXT, "
-              "billing_base_url TEXT, task TEXT, api_call_count INT, input_tokens INT, output_tokens INT, "
+              "billing_base_url TEXT, task TEXT, billing_provider TEXT, api_call_count INT, input_tokens INT, output_tokens INT, "
               "cache_read_tokens INT, cache_write_tokens INT, actual_cost_usd REAL, total_cost REAL, "
               "estimated_cost_usd REAL, cost_source TEXT, first_seen REAL, last_seen REAL)")
     for r in rows:
-        c.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        c.execute("INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   ("s", r.get("model", V41), r.get("host", "DeepInfra"), r.get("base", "https://openrouter.ai/api/v1"),
-                   r.get("task", ""), r["calls"], 1000 * r["calls"], 100 * r["calls"], 0, 0, 0, r.get("cost", 0.0), 0,
+                   r.get("task", ""), r.get("billing", ""), r["calls"], 1000 * r["calls"], 100 * r["calls"], 0, 0, 0, r.get("cost", 0.0), 0,
                    r.get("src", ""), r["fs"], r["ls"]))
     c.commit(); c.close()
 

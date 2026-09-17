@@ -69,6 +69,6 @@ def test_the_text_matches_what_the_souls_carry_today():
     import re
     src = (LIVE / "SOUL.md").read_text(encoding="utf-8")
     m = re.search(r"(?ms)^## Human Privacy Guardrail.*?(?=^## |^---\s*$|\Z)", src)
-    if not m:
-        pytest.skip("root SOUL no longer carries the block (already migrated)")
+    if not m or "Rendered into this prompt by the `fleet-privacy-guardrail` plugin" in m.group(0):
+        pytest.skip("root SOUL no longer carries the block (already migrated; pointer stub only)")
     assert m.group(0).strip() == fpg.guardrail_text().strip()

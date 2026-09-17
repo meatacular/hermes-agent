@@ -110,7 +110,7 @@ def _wrap_set_cap(orig, kdb):
         who = (getattr(task, "assignee", None) or "") if task is not None else ""
         if task is not None and extended_for(conn, task_id, who):
             raise ValueError(
-                f"{who or 'this worker'} has already had their one extension on {task_id}; "
+                f"{who or 'this worker'} has already been extended once on {task_id}; "
                 "a second breach by the same worker stays blocked for Richie (overwatch rule)"
             )
         # The kernel refuses a second extension per CARD. Under the per-worker policy a different
@@ -125,6 +125,8 @@ def _wrap_set_cap(orig, kdb):
                 "only Richie can move a worker past it (split the card instead)"
             )
         old = getattr(task, "max_cost", None) if task is not None else None
+        if old is not None and new_cap <= float(old):
+            raise ValueError(f"cap ${new_cap:.2f} is not above the current cap ${float(old):.2f}")
         with kdb.write_txn(conn):
             conn.execute("UPDATE tasks SET max_cost = ? WHERE id = ?", (new_cap, task_id))
             kdb.add_comment(

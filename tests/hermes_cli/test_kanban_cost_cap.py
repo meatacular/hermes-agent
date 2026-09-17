@@ -117,9 +117,11 @@ def test_cost_cap_trip_blocks_without_retry(kanban_home):
     conn = kbc.connect()
     W = _workspace(kanban_home, "cap")
     tid = kb.create_task(
-        conn, title="x", assignee="bob", max_cost=0.01, workspace_path=W
+        conn, title="x", assignee="bob", max_cost=1.00, workspace_path=W
     )
     _claim_running(conn, tid)
+    # (fleet: kanban-cost-cap-per-worker normalises a running card's cap to the $1.00 base, so the
+    # cap under test is the base, not an arbitrary small number)
     state_db = _make_state_db(kanban_home / "state.db", [(W, 1.25)], task_id=tid)
 
     sigs: list[tuple] = []
@@ -169,7 +171,7 @@ def test_cost_cap_block_comment_records_both_numbers(kanban_home):
     comments = kb.list_comments(conn, tid)
     joined = "\n".join(c.body for c in comments)
     assert "1.25" in joined  # ~spend
-    assert "0.01" in joined  # ~cap
+    assert "1.00" in joined  # ~cap (the fleet base)
     assert "cost" in joined
     conn.close()
 
@@ -204,14 +206,14 @@ def test_cost_cap_cumulative_across_run_sessions(kanban_home):
     conn = kbc.connect()
     W = _workspace(kanban_home, "cumulative")
     tid = kb.create_task(
-        conn, title="x", assignee="bob", max_cost=0.50, workspace_path=W
+        conn, title="x", assignee="bob", max_cost=1.00, workspace_path=W
     )
     _claim_running(conn, tid)
-    # Three retries already racked up 0.30 + 0.11 + 0.55 = 0.96 > 0.50 cap,
+    # Three retries already racked up 0.30 + 0.31 + 0.55 = 1.16 > 1.00 cap (the fleet base),
     # across DISTINCT sessions under the SAME workspace path.
     state_db = _make_state_db(
         kanban_home / "state.db",
-        [(W, 0.30), (W, 0.11), (W, 0.55)],
+        [(W, 0.30), (W, 0.31), (W, 0.55)],
         task_id=tid,
     )
     capped = kb.enforce_max_cost(

@@ -361,16 +361,18 @@ def usage(window: int = 7 * 86400, bucket: Optional[int] = None, tz: Optional[st
                                      if not r.get("invoiced") and not r["modelark"]), 6)
     tot["subscription_calls"] = sum(r["calls"] for r in rows if r["modelark"])
     by_payer = {}
+    # `py`, not `b`: `b` is the bucket size returned below, and the payer loop shadowed it
+    # (2026-09-18: usage()["bucket"] came back as the last payer's dict; test_usage_spreads caught it).
     for r in rows:
-        b = by_payer.setdefault(r.get("payer") or "openrouter",
-                                {"calls": 0, "billed_usd": 0.0, "input": 0, "output": 0,
-                                 "cache_read": 0, "invoiced": bool(r.get("invoiced"))})
-        b["calls"] += r["calls"]; b["billed_usd"] += r["billed_usd"]
-        b["input"] += r["input"]; b["output"] += r["output"]; b["cache_read"] += r["cache_read"]
-    for b in by_payer.values():
-        b["billed_usd"] = round(b["billed_usd"], 6)
-        d = b["input"] + b["cache_read"]
-        b["cache_hit_pct"] = round(100.0 * b["cache_read"] / d, 1) if d else None
+        py = by_payer.setdefault(r.get("payer") or "openrouter",
+                                 {"calls": 0, "billed_usd": 0.0, "input": 0, "output": 0,
+                                  "cache_read": 0, "invoiced": bool(r.get("invoiced"))})
+        py["calls"] += r["calls"]; py["billed_usd"] += r["billed_usd"]
+        py["input"] += r["input"]; py["output"] += r["output"]; py["cache_read"] += r["cache_read"]
+    for py in by_payer.values():
+        py["billed_usd"] = round(py["billed_usd"], 6)
+        d = py["input"] + py["cache_read"]
+        py["cache_hit_pct"] = round(100.0 * py["cache_read"] / d, 1) if d else None
     tot["by_payer"] = by_payer
     return {"window": window, "bucket": b, "since": since, "now": now, "tz": tzname, "days": round(window / 86400, 4),
             "method": "spread", "rows": sorted(rows, key=lambda r: (-r["billed_usd"], -r["calls"])), "series": series,
