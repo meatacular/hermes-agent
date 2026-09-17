@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 __all__ = ["register", "on_pre_tool_call", "verdict", "declared_extension_point",
-           "branch_citations", "worktree_base_conflict"]
+           "branch_citations", "worktree_base_conflict", "dir_workspace_conflict"]
 
 logger = logging.getLogger(__name__)
 
@@ -609,6 +609,76 @@ def worktree_base_conflict(args: Any, resolve_repo=None, repo_refs=None) -> Opti
     return None
 
 
+DIR_REASON_PREFIX = "dir workspace"
+
+
+def dir_workspace_conflict(args: Any, repo_root_for=None) -> Optional[str]:
+    """Refusal reason for a ``dir`` card whose workspace is not a populated git work tree.
+
+    Card t_a8fa2e12 (2026-09-16): a `dir` card minted at an EMPTY directory was spawned anyway,
+    the worker hunted for its subject, landed in the deployed `hermes-agent` checkout and
+    committed there unreviewed. A `dir` card means "work in this existing tree" — so the tree
+    must exist, hold something, and be inside a git repo. An absent ``workspace_path`` is left
+    to the kernel's own defaults (fail open); only an EXPLICIT path that cannot carry the work
+    is refused.
+    """
+    if not isinstance(args, dict):
+        return None
+    if str(args.get("workspace_kind") or "").strip().lower() != "dir":
+        return None
+    path = str(args.get("workspace_path") or "").strip()
+    if not path:
+        return None
+    p = Path(path).expanduser()
+    if not p.is_dir():
+        return f"{DIR_REASON_PREFIX} {path!r} does not exist (or is not a directory)"
+    try:
+        if not any(p.iterdir()):
+            return f"{DIR_REASON_PREFIX} {path!r} is an EMPTY directory"
+    except OSError:
+        return None
+    root = (repo_root_for or _repo_root_for)(p)
+    if root is None:
+        return f"{DIR_REASON_PREFIX} {path!r} is not inside a git repository"
+    # The LIVE platform checkout is never a build workspace. Workers that edited it in place
+    # are how six unapproved kernel commits reached `fleet` on 2026-09-16/17 and how the
+    # checkout sat on a test branch for two hours on 2026-09-12. Review/verify cards may read it.
+    live = _live_platform_root()
+    if live is not None and Path(root).resolve() == live and _lane(str(args.get("title") or "")) == "build":
+        return (f"{DIR_REASON_PREFIX} {path!r} is the LIVE platform checkout and this is a build-lane "
+                "card; build in a `worktree` card (or a `dir` card at a worktree from `git worktree list`)")
+    return None
+
+
+def _live_platform_root() -> Optional[Path]:
+    """`<fleet root>/hermes-agent`. In a worker HERMES_HOME is `<fleet root>/profiles/<p>`, so
+    climb out of `profiles/` first — the profile home never holds the checkout."""
+    try:
+        root = _hermes_root()
+        if root.parent.name == "profiles":
+            root = root.parent.parent
+        p = (root / "hermes-agent").resolve()
+        return p if p.is_dir() else None
+    except OSError:
+        return None
+
+
+def _dir_message(reason: str) -> str:
+    return (
+        f"Refusing to mint this card: {reason}.\n\n"
+        "A `dir` card tells the worker \"the work lives in this existing tree\". When the tree is "
+        "empty, missing or not a git checkout, the worker has nothing to work IN, hunts the "
+        "filesystem for its subject, and on 2026-09-16 one landed in the deployed platform checkout "
+        "and committed there unreviewed (card t_a8fa2e12).\n\n"
+        "Proceed one of three ways:\n"
+        "  * the work belongs in an existing checkout -> point `workspace_path` at it (a git "
+        "worktree from `git worktree list`, or the project's primary path).\n"
+        "  * the deliverable is a fleet script/watchdog/plugin -> use `workspace_kind='scratch'` "
+        "and name the destination file in the body; or `worktree` under the platform repo.\n"
+        "  * you meant a new worktree -> `workspace_kind='worktree'` and let the dispatcher cut it.\n"
+    )
+
+
 def _worktree_message(reason: str) -> str:
     branch = "that branch"
     m = re.search(r"the body names '([^']+)'", reason)
@@ -666,6 +736,9 @@ def verdict(title: str, assignee: str, body: Any = "", args: Any = None) -> Opti
         base_reason = worktree_base_conflict(args)
         if base_reason:
             return base_reason
+        dir_reason = dir_workspace_conflict(args)
+        if dir_reason:
+            return dir_reason
 
     a = (assignee or "").strip().lower()
     if not a or not (title or "").strip():
@@ -792,6 +865,8 @@ def _message_for(title: str, assignee: str, reason: str) -> str:
     """
     if reason.startswith(WORKTREE_REASON_PREFIX):
         return _worktree_message(reason)
+    if reason.startswith(DIR_REASON_PREFIX):
+        return _dir_message(reason)
     if reason.startswith("extension-point"):
         return _ladder_message(reason)
     if reason.startswith("this review-lane card"):

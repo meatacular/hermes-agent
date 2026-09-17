@@ -1,0 +1,37 @@
+name: kanban-completion-gate
+version: 0.2.0
+kind: backend
+author: Agent Smith (WeRoll fleet)
+description: >-
+  Charter rule 3 — "done requires a commit" — enforced from a PLUGIN instead of a
+  core patch. This is the proving run for the 2026-09-09 decision to stop patching
+  upstream's core: the same behaviour as
+  tools/kanban_tools.py::_complete_uncommitted_work_rejection, moved onto the
+  upstream `pre_tool_call` hook so it stops being merge-conflict surface.
+
+  Why this one first: it is a single, well-understood block/allow decision; it is
+  the one control that would actually have prevented the 2026-09-04 work-loss
+  incident (four cards built, Rodge-approved, marked done, and the commit exists in
+  no branch and no reflog); and `pre_tool_call` is in the loader's
+  _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS set, so if this callback ever hangs the tool call
+  is refused rather than waved through — the correct direction for a gate.
+
+  Deliberately NARROW and fail-open, exactly as the core version:
+    * worker completions only (HERMES_KANBAN_TASK must match) — the orchestrator
+      and the CLI pass straight through;
+    * `dir` workspaces only — a `worktree` card has its own branch and a `scratch`
+      card has no repo to lose;
+    * TRACKED changes only (--untracked-files=no), so a worker's scratch never
+      traps its own card;
+    * any uncertainty at all — no git, not a repo, timeout, unreadable task —
+      ALLOWS the completion. A gate that guesses is worse than no gate.
+
+  It imports only hermes_cli.kanban_db, and only get_task, which is one of the
+  seven functions verified to still exist upstream after the refactor. That is what
+  makes it portable across the merge.
+
+  0.2.0 (2026-09-17, card t_a858dad6): BUNDLED as kind: backend. As a user plugin in
+  ~/.hermes/plugins it loaded only under root's HERMES_HOME (trap 28) — no kanban
+  worker ever ran it, so charter rule 3 was enforced by nothing from 2026-09-09.
+provides_hooks:
+  - pre_tool_call
