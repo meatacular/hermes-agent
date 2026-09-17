@@ -1,0 +1,13 @@
+name: attach-evidence-guard
+version: 1.0.0
+kind: backend
+author: Claude (Cowork), for the WeRoll fleet
+description: >-
+  A blank image is not evidence. Refuses `kanban_attach` when the payload is an image
+  whose header says 0x0 (or a file of 0 bytes), so a placeholder can never satisfy a
+  "captures attached" acceptance criterion. Card t_8a872d36 (2026-09-17): two 18-byte
+  0x0 PNG stubs reached a card as its evidence and a gate would have accepted them.
+  Reads only the bytes in the tool call — no board read, no file read, fail-open on
+  anything it cannot parse. Backend, so it loads in every profile and worker.
+provides_hooks:
+  - pre_tool_call

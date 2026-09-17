@@ -756,3 +756,86 @@ def test_the_hook_refuses_a_worktree_card_on_the_wrong_base(monkeypatch):
     out2 = mg.on_pre_tool_call(tool_name="kanban_create",
                                args={"title": "Build the thing", "assignee": "rodge"})
     assert "review lane" in out2["message"] and "worktree base" not in out2["message"]
+
+
+# ---------------------------------------------------------------------------------------------
+# `dir` workspace rule (card t_a8fa2e12, 2026-09-17): an explicit `dir` path must be a populated
+# git work tree. Absent path -> kernel defaults (fail open). scratch/worktree kinds untouched.
+# ---------------------------------------------------------------------------------------------
+
+def _dir_args(path, kind="dir", **kw):
+    a = {"title": "[build] implement the thing", "assignee": "bob", "body": "do the thing",
+         "workspace_kind": kind, "workspace_path": path}
+    a.update(kw)
+    return a
+
+
+def test_dir_card_at_a_missing_path_is_refused(tmp_path):
+    r = mg.dir_workspace_conflict(_dir_args(str(tmp_path / "nope")), repo_root_for=lambda p: p)
+    assert r and r.startswith(mg.DIR_REASON_PREFIX) and "does not exist" in r
+
+
+def test_dir_card_at_an_empty_directory_is_refused(tmp_path):
+    d = tmp_path / "empty"; d.mkdir()
+    r = mg.dir_workspace_conflict(_dir_args(str(d)), repo_root_for=lambda p: p)
+    assert r and "EMPTY" in r
+
+
+def test_dir_card_outside_any_git_repo_is_refused(tmp_path):
+    d = tmp_path / "plain"; d.mkdir(); (d / "f").write_text("x")
+    r = mg.dir_workspace_conflict(_dir_args(str(d)), repo_root_for=lambda p: None)
+    assert r and "not inside a git repository" in r
+
+
+def test_dir_card_in_a_populated_checkout_is_allowed(tmp_path):
+    d = tmp_path / "repo"; d.mkdir(); (d / "f").write_text("x")
+    assert mg.dir_workspace_conflict(_dir_args(str(d)), repo_root_for=lambda p: p) is None
+
+
+def test_dir_rule_ignores_other_kinds_and_absent_paths(tmp_path):
+    d = tmp_path / "empty"; d.mkdir()
+    assert mg.dir_workspace_conflict(_dir_args(str(d), kind="scratch"), repo_root_for=lambda p: p) is None
+    assert mg.dir_workspace_conflict(_dir_args(str(d), kind="worktree"), repo_root_for=lambda p: p) is None
+    assert mg.dir_workspace_conflict(_dir_args("", kind="dir"), repo_root_for=lambda p: p) is None
+
+
+def test_the_hook_refuses_an_empty_dir_card_with_the_dir_message(tmp_path, monkeypatch):
+    d = tmp_path / "empty"; d.mkdir()
+    out = mg.on_pre_tool_call(tool_name="kanban_create", args=_dir_args(str(d)))
+    assert out and out["action"] == "block" and "A `dir` card tells the worker" in out["message"]
+
+
+def test_control_the_dir_rule_is_not_vacuous(tmp_path, monkeypatch):
+    """Neuter the rule and the same empty-dir card mints — proves the refusal above is the rule's."""
+    d = tmp_path / "empty"; d.mkdir()
+    monkeypatch.setattr(mg, "dir_workspace_conflict", lambda args, repo_root_for=None: None)
+    assert mg.on_pre_tool_call(tool_name="kanban_create", args=_dir_args(str(d))) is None
+
+
+def test_build_card_at_the_live_platform_checkout_is_refused(tmp_path, monkeypatch):
+    live = tmp_path / ".hermes" / "hermes-agent"; live.mkdir(parents=True); (live / "f").write_text("x")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes" / "profiles" / "bob"))   # a worker's home
+    r = mg.dir_workspace_conflict(_dir_args(str(live), title="[build] fix the thing"), repo_root_for=lambda p: p)
+    assert r and "LIVE platform checkout" in r
+
+
+def test_review_card_at_the_live_platform_checkout_is_allowed(tmp_path, monkeypatch):
+    live = tmp_path / ".hermes" / "hermes-agent"; live.mkdir(parents=True); (live / "f").write_text("x")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    assert mg.dir_workspace_conflict(_dir_args(str(live), title="[Rodge] review the thing"), repo_root_for=lambda p: p) is None
+    assert mg.dir_workspace_conflict(_dir_args(str(live), title="[Verify] the thing is live"), repo_root_for=lambda p: p) is None
+
+
+def test_second_build_card_at_a_shared_dir_is_refused(tmp_path):
+    d = tmp_path / "shared"; d.mkdir(); (d / "f").write_text("x")
+    rows = [("t_aaaa0001", "[build] first thing")]
+    r = mg.dir_workspace_conflict(_dir_args(str(d), title="[build] second thing"), repo_root_for=lambda p: p, board_reader=lambda path: rows)
+    assert r and "already carries a build-lane card in flight" in r and "t_aaaa0001" in r
+
+
+def test_shared_dir_rule_ignores_non_build_neighbours_and_fails_open(tmp_path):
+    d = tmp_path / "shared"; d.mkdir(); (d / "f").write_text("x")
+    assert mg.dir_workspace_conflict(_dir_args(str(d), title="[build] x"), repo_root_for=lambda p: p, board_reader=lambda path: [("t_1", "[Rodge] review y")]) is None
+    assert mg.dir_workspace_conflict(_dir_args(str(d), title="[Verify] x"), repo_root_for=lambda p: p, board_reader=lambda path: [("t_1", "[build] y")]) is None
+    def boom(path): raise RuntimeError("board unreadable")
+    assert mg.dir_workspace_conflict(_dir_args(str(d), title="[build] x"), repo_root_for=lambda p: p, board_reader=boom) is None
