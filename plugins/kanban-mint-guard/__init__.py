@@ -612,7 +612,7 @@ def worktree_base_conflict(args: Any, resolve_repo=None, repo_refs=None) -> Opti
 DIR_REASON_PREFIX = "dir workspace"
 
 
-def dir_workspace_conflict(args: Any, repo_root_for=None) -> Optional[str]:
+def dir_workspace_conflict(args: Any, repo_root_for=None, board_reader=None) -> Optional[str]:
     """Refusal reason for a ``dir`` card whose workspace is not a populated git work tree.
 
     Card t_a8fa2e12 (2026-09-16): a `dir` card minted at an EMPTY directory was spawned anyway,
@@ -644,10 +644,40 @@ def dir_workspace_conflict(args: Any, repo_root_for=None) -> Optional[str]:
     # are how six unapproved kernel commits reached `fleet` on 2026-09-16/17 and how the
     # checkout sat on a test branch for two hours on 2026-09-12. Review/verify cards may read it.
     live = _live_platform_root()
-    if live is not None and Path(root).resolve() == live and _lane(str(args.get("title") or "")) == "build":
+    lane = _lane(str(args.get("title") or ""))
+    if live is not None and Path(root).resolve() == live and lane == "build":
         return (f"{DIR_REASON_PREFIX} {path!r} is the LIVE platform checkout and this is a build-lane "
                 "card; build in a `worktree` card (or a `dir` card at a worktree from `git worktree list`)")
+    if lane == "build":
+        other = _concurrent_build_at(p, board_reader)
+        if other:
+            return (f"{DIR_REASON_PREFIX} {path!r} already carries a build-lane card in flight ({other}); "
+                    "two builds committing into one shared tree swallow each other's deliverables "
+                    "(card t_0ec7e1d5) — link this card behind it, or give it its own `worktree`")
     return None
+
+
+def _concurrent_build_at(p: Path, board_reader=None) -> Optional[str]:
+    """Id+title of a running/ready build-lane `dir` card at the same path, or None. Fail-open."""
+    try:
+        rows = (board_reader or _dir_cards_in_flight)(str(p))
+    except Exception:  # noqa: BLE001
+        return None
+    for tid, title in rows or ():
+        if _lane(str(title or "")) == "build":
+            return f"{tid} {str(title or '')[:60]!r}"
+    return None
+
+
+def _dir_cards_in_flight(path: str):
+    """Running/ready `dir` cards at `path` from the shared board — the same store the kernel reads."""
+    from hermes_cli.kanban_db_connect import connect_closing  # noqa: PLC0415
+    want = {str(Path(path)), str(Path(path).resolve())}
+    with connect_closing() as conn:
+        rows = conn.execute(
+            "SELECT id, title, workspace_path FROM tasks WHERE workspace_kind = 'dir' "
+            "AND status IN ('running', 'ready')").fetchall()
+    return [(r[0], r[1]) for r in rows if str(r[2] or "") in want]
 
 
 def _live_platform_root() -> Optional[Path]:
