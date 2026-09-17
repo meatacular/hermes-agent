@@ -30,3 +30,11 @@ description: >-
     callback returns immediately, since the firing worker process is short-lived.
 provides_hooks:
   - kanban_task_blocked
+  # AC1's second path (2026-09-16, card t_2da01ffe). The escalation lease is the key for both:
+  #   pre_llm_call  — injects the awareness line into a duplicate session's own turn when that turn
+  #                   IS a kanban notification for a card whose assessment is in flight.
+  #   pre_tool_call — refuses a WRITE to that card from any session that is not the assessor, on
+  #                   all three measured surfaces (kanban tools, `hermes kanban` writes in
+  #                   `terminal`, direct kanban.db writes). Reads are untouched.
+  - pre_llm_call
+  - pre_tool_call

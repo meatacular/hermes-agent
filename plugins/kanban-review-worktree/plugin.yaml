@@ -1,0 +1,13 @@
+name: kanban-review-worktree
+version: 0.1.0
+kind: backend
+provides_hooks:
+  - pre_tool_call
+author: WeRoll fleet
+description: >-
+  On the kanban_create tool path, routes a review-shaped card to its sole
+  implementation parent's reviewed workspace before the dispatcher cuts the card. CLI
+  creates and direct database inserts do not pass through this hook. It is
+  fail-open for missing boards, ambiguous parents, non-worktree cards, missing
+  branches and all exceptions. Explicit workspace arguments always win; cards
+  with no or multiple implementation parents are logged and left untouched.

@@ -28,9 +28,12 @@ import functools
 import logging
 import sqlite3
 import sys
+import importlib.util
 from decimal import Decimal
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
 
 LABEL = "modelark subscription"
 ARK_HOST = "ark.ap-southeast.bytepluses.com"
@@ -45,6 +48,18 @@ FAMILY = {
 }
 _MARK = "_modelark_subscription_wrapped"
 _REG = [None, {}]
+_INSTALLED = False
+
+
+def _ensure_costscope(kdb):
+    if hasattr(kdb, "costscope_predicate") and getattr(kdb._session_cost_in_db, "_costscope_wrapped", False):
+        return False
+    path = Path(__file__).resolve().parents[1] / "costscope" / "__init__.py"
+    spec = importlib.util.spec_from_file_location("costscope_backend", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install()
+    return True
 
 
 def fleet_rates() -> dict:
@@ -155,36 +170,10 @@ def cap_equivalent_rows(conn, where: str, params) -> tuple[float, int]:
     return float(usd), calls
 
 
-def _wrap_session_cost(orig, kdb):
-    @functools.wraps(orig)
-    def _session_cost_in_db(state_db_path, prefix_for=None, task_id=None):
-        base = orig(state_db_path, prefix_for=prefix_for, task_id=task_id)
-        try:
-            prefix = str(prefix_for).rstrip("/\\") if prefix_for else ""
-            clauses, params = [], []
-            if prefix:
-                clauses.append("(s.cwd = ? OR s.cwd LIKE ? ESCAPE '\\')")
-                params += [prefix, kdb._escape_like(prefix) + "/%"]
-            if task_id:
-                clauses.append("s.title LIKE ? ESCAPE '\\'")
-                params.append("%" + kdb._escape_like(str(task_id)) + "%")
-            if not clauses:
-                return base
-            conn = sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True, timeout=10)
-            try:
-                extra, _ = cap_equivalent_rows(conn, " OR ".join(clauses), params)
-            finally:
-                conn.close()
-            return base + extra
-        except Exception:  # noqa: BLE001 — the cap sum is fail-open by design; never raise from it
-            return base
-    setattr(_session_cost_in_db, _MARK, True)
-    return _session_cost_in_db
-
-
 def modelark_cap_equivalent(task_id: str) -> tuple[float, int]:
     """(cap-equivalent $, calls) of a card's Coding Plan usage across every ledger — for briefs/reports."""
     from pathlib import Path
+    from hermes_cli import kanban_db
     try:
         from hermes_constants import get_default_hermes_root
         root = Path(get_default_hermes_root())
@@ -195,7 +184,9 @@ def modelark_cap_equivalent(task_id: str) -> tuple[float, int]:
         try:
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
             try:
-                u, n = cap_equivalent_rows(conn, "s.title LIKE ?", [f"%{task_id}%"])
+                _ensure_costscope(kanban_db)
+                where, params = kanban_db.costscope_predicate(task_id=task_id)
+                u, n = cap_equivalent_rows(conn, where, params)
             finally:
                 conn.close()
             usd += u; calls += n
@@ -206,12 +197,17 @@ def modelark_cap_equivalent(task_id: str) -> tuple[float, int]:
 
 def install() -> list:
     """Wrap the three seams. Idempotent. Returns the names wrapped this call."""
+    global _INSTALLED
+    if _INSTALLED:
+        return []
     done = []
     from agent import usage_pricing as up
     if not getattr(up.resolve_billing_route, _MARK, False):
-        up.resolve_billing_route = _wrap_route(up.resolve_billing_route); done.append("resolve_billing_route")
+        up.resolve_billing_route = _wrap_route(up.resolve_billing_route)
+    done.append("resolve_billing_route")
     if not getattr(up.estimate_usage_cost, _MARK, False):
-        up.estimate_usage_cost = _wrap_estimate(up.estimate_usage_cost, up); done.append("estimate_usage_cost")
+        up.estimate_usage_cost = _wrap_estimate(up.estimate_usage_cost, up)
+    done.append("estimate_usage_cost")
     # Modules that bound estimate_usage_cost by name before this plugin loaded.
     for modname in ("agent.turn_usage", "agent.insights"):
         mod = sys.modules.get(modname)
@@ -220,11 +216,19 @@ def install() -> list:
             mod.estimate_usage_cost = up.estimate_usage_cost; done.append(modname)
     try:
         from hermes_cli import kanban_db as kdb
-        if not getattr(kdb._session_cost_in_db, _MARK, False):
-            kdb._session_cost_in_db = _wrap_session_cost(kdb._session_cost_in_db, kdb); done.append("_session_cost_in_db")
+        _ensure_costscope(kdb)
+        # costscope is a sibling backend and owns the one predicate.  In the
+        # normal loader it runs in dependency order; isolated imports install
+        # it here rather than rebuilding its SQL in this plugin.
+        kdb.costscope_cap_equivalent = cap_equivalent_rows
+        if getattr(kdb._session_cost_in_db, "_costscope_wrapped", False):
+            if "_session_cost_in_db" not in done:
+                done.append("_session_cost_in_db")
+            done.append("costscope_cap_equivalent")
         kdb.modelark_cap_equivalent = modelark_cap_equivalent
     except Exception as exc:  # noqa: BLE001
         logger.warning("modelark-pricing: kanban cap seam not installed (%s) — the $1 cap is blind to ModelArk", exc)
+    _INSTALLED = True
     return done
 
 

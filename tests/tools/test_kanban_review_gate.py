@@ -125,6 +125,30 @@ def test_gate_green_path_proceeds_to_review(
         assert kb.get_task(conn, tid).status == "review"
 
 
+def test_gate_import_sanity_does_not_inherit_pythonpath(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The project interpreter must not resolve imports from Hermes' PYTHONPATH."""
+    ws = _add_worktree(repo, "hermetic-pythonpath")
+    poison = tmp_path / "hermes-site-packages"
+    poison.mkdir()
+    monkeypatch.setenv("PYTHONPATH", str(poison))
+    _change_python_file(
+        ws,
+        "mymod.py",
+        "import sys\n"
+        f"assert {str(poison)!r} not in sys.path, sys.path\n",
+    )
+
+    tid = _make_task(tmp_path / ".hermes", monkeypatch, ws)
+    from tools import kanban_tools as tools
+
+    resp = json.loads(tools._handle_request_review({"summary": "hermetic"}))
+    assert resp.get("ok") is True, resp
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, tid).status == "review"
+
+
 def test_gate_failing_build_bounces_card(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

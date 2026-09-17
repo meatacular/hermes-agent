@@ -1,0 +1,79 @@
+name: hold-marker-guard
+version: 1.0.0
+kind: backend
+provides_hooks:
+  - pre_tool_call
+author: Agent Smith for Richie, 2026-09-16
+description: >-
+  A card minted as a human gate (`kanban_create` with `hold=True`) gets the one line the
+  hold watcher reads — `operator-hold: manual` — written into its body, so the hold cannot
+  be auto-released by the very watchdog that is supposed to protect it.
+
+  THE DEFECT (card t_46783f69, Richie-approved 3A+B 2026-09-16)
+  ------------------------------------------------------------
+  `scripts/release-operator-hold-watch.py` keeps a hold only when the card declares
+  `operator-hold: manual` (rule 2, evaluated above every release rule). Its docstring calls
+  the BODY placement canonical — "the minting card writes it" — and nothing enforced that.
+  Under the 2026-09-15 rule an UNMARKED hold is RELEASED and announced: rule 3
+  (`no_parents`, a standalone hold) or rule 5 (`no_marker`, parents all done). So a human
+  gate — "Richie supplies the Slack apps and tokens", "which of the three seams closes this"
+  — was released minutes after minting and dispatched to a worker that could not answer it.
+
+  Measured on the live board the day this shipped: 46 held cards, 28 created through a tool
+  call and 18 without one; the marker census run before the fix reads "47 minted-held in
+  26h; 21 carry a real marker, 26 do not". Four walls from a single decomposer pass were
+  released unmarked in one day and each bought a wasted dispatch; three of those workers
+  re-blocked with `capability`/`needs_input`, which is an ALWAYS-escalate kind, so each also
+  bought an overwatch session. The defect fired on its own card too: minted held, released
+  under rule 3 fifteen seconds later, claimed, spawned, spent a worker run, ended in a
+  `cost_cap` block — two budget events caused by one missing line.
+
+  WHAT THIS PLUGIN IS, AND WHAT IT IS NOT
+  ---------------------------------------
+  This is the FIRST HALF of the ruling, and it is deliberately not presented as the whole
+  fix: a `pre_tool_call` hook sees `kanban_create` calls, which the feasibility memo on
+  `t_4448a10d` measured at 61% of held cards. The other 39% — the auto-decomposer's direct
+  INSERT, `hermes kanban create --hold`, the dashboard — have no creation-time hook in
+  `VALID_HOOKS`, and are covered by the same rule at `create_task` and at the decomposer
+  insert, shipped as apply-queue item `006-hold-marker-kernel` (armed, `core_patch_approved`,
+  `requires_idle_board`). A plugin alone would read as "holds are handled" while a third of
+  them were not; that is the decorative-gate class, and it is why Richie ruled both pieces
+  rather than this one.
+
+  THE DECISION, IN ONE LINE
+  -------------------------
+  `hold` truthy AND the body declares NO marker -> the marker is appended on its own line.
+  Nothing else changes: not the title, not the assignee, not the status, not the body's
+  existing text.
+
+  Two deliberate narrowings, both paying for themselves:
+
+  * **A body that already declares a marker is left alone.** `operator-hold: dependency-wait`
+    is an author saying "this is a sequencing wait that releases itself"; adding `manual`
+    would convert it into a sticky gate, and re-introducing mandatory holds is exactly what
+    Richie's 2026-09-15 rule forbids. This guard speaks only into silence. Re-minting the
+    same card is therefore a no-op.
+  * **The marker must be a line the READER accepts, so the reader's parser decides whether
+    one is already there.** `marker_of()` uses the canonical helper added by the kernel
+    piece (`hermes_cli.hold_marker.find_marker`) when it is importable and this module's own
+    copy otherwise; the suite pins that copy against the real
+    `release-operator-hold-watch.find_marker` over a corpus (mid-line prose, heading and list
+    markers, emphasis, `manualish`, `manual-approval`, the two-token case), so the two cannot
+    diverge silently. After item 006 is applied the fleet computes this predicate in one
+    place, which is the anti-drift requirement the ruling set out.
+
+  WHY NOT THE OTHER SEAMS. A skill is what was already tried and lost: the rule was live on
+  the minting profile at 08:21 and four cards were minted unmarked at 11:56–12:35 the same
+  morning — an instruction is not enforcement. The watchdog's own rule list cannot carry it
+  either: `.schema tasks` has no hold column, so no rule can tell a human gate from a
+  sequencing wait (that is card S3, not this one). And `titles` were explicitly ruled out as
+  the mechanism on 2026-09-15.
+
+  FAIL-OPEN BY CONSTRUCTION. Refusing to mint is forbidden — it is how a board stops
+  entirely. No args, a non-dict payload, a non-text body, an unreadable canonical module,
+  any exception: the call proceeds exactly as it would without this guard, and the guard
+  logs. It cannot block, delay or refuse a `kanban_create`.
+
+  kind: backend so it loads in every profile and every kanban worker — a user plugin in
+  `~/.hermes/plugins` is invisible to workers, which is how the completion gate was a silent
+  no-op from 09-09 to 09-11.

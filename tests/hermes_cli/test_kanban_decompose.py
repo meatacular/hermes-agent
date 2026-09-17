@@ -77,6 +77,38 @@ def _patch_list_profiles(names: list[str]):
     ]
 
 
+def test_ac2_orchestrator_scope_routes_backupbrain_away_from_axel(monkeypatch):
+    """A scoped orchestrator cannot retain a non-WeRoll root."""
+    monkeypatch.setattr(
+        decomp.profiles_mod, "profile_exists", lambda name: name in {"axel", "jobsy"},
+    )
+    routing = decomp._load_routing(
+        tenant="backupbrain",
+        config={"kanban": {
+            "orchestrator_profile": "axel",
+            "default_assignee": "jobsy",
+            "orchestrator_scopes": {"axel": ["weroll"], "jobsy": ["backupbrain"]},
+        }},
+    )
+    assert routing.orchestrator == "jobsy"
+
+
+def test_ac2_orchestrator_scope_keeps_axel_for_weroll(monkeypatch):
+    """The same routing output remains valid for the WeRoll tenant."""
+    monkeypatch.setattr(
+        decomp.profiles_mod, "profile_exists", lambda name: name in {"axel", "jobsy"},
+    )
+    routing = decomp._load_routing(
+        tenant="weroll",
+        config={"kanban": {
+            "orchestrator_profile": "axel",
+            "default_assignee": "jobsy",
+            "orchestrator_scopes": {"axel": ["weroll"], "jobsy": ["backupbrain"]},
+        }},
+    )
+    assert routing.orchestrator == "axel"
+
+
 def test_decompose_with_fanout_creates_children(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="ship a feature", triage=True)

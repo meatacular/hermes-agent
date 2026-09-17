@@ -75,6 +75,19 @@ def _history(c, tid):
     return out
 
 
+def _decision_evidence(c, tid):
+    """Return the latest typed human-decision reason and card evidence."""
+    try:
+        row = c.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' "
+            "ORDER BY id DESC LIMIT 1", (tid,)
+        ).fetchone()
+        payload = json.loads((row[0] if row else "") or "{}")
+        return str(payload.get("reason") or "")[:240]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def main() -> int:
     if not DB.exists():
         return 0
@@ -115,7 +128,8 @@ def main() -> int:
         if not r["marker"]:
             continue
         key = f"{r['id']}:{r['block_recurrences']}"
-        if key in ceiling_seen:
+        ceiling_key = f"ceiling:{key}"
+        if ceiling_key in ceiling_seen:
             continue
         is_cost = (r["block_kind"] or "") == "cost_cap"
         kind_s = "cost cap" if is_cost else (r["block_kind"] or "fault signal")
@@ -139,7 +153,36 @@ def main() -> int:
                 "  Reply: `rewrite <id>` (Smith re-briefs it narrower), `kill <id>`, "
                 "or `unblock <id>` to give it one more run."
             )
-        ceiling_seen[key] = int(now)
+        ceiling_seen[ceiling_key] = int(now)
+
+    # 1b. A needs_input block is already a decision-shaped escalation.  It must
+    # not wait for the loop breaker to manufacture an escalation-ceiling marker:
+    # triage cards are never dispatched again, so that marker can never arrive.
+    try:
+        decisions = c.execute(
+            "SELECT id, title, assignee, block_recurrences, body "
+            "FROM tasks WHERE status IN ('blocked','triage') AND block_kind='needs_input'"
+        ).fetchall()
+    except Exception as e:  # noqa: BLE001
+        decisions = []
+        lines.append(f"  (needs_input query failed: {e})")
+    for r in decisions:
+        key = f"{r['id']}:{r['block_recurrences']}"
+        decision_key = f"decision:{key}"
+        if decision_key in ceiling_seen or f"ceiling:{key}" in ceiling_seen:
+            continue
+        reason = " ".join(_decision_evidence(c, r["id"]).split())[:240]
+        body = " ".join((r["body"] or "").split())[:240]
+        lines.append(
+            f"*Decision needed from Operator.* `{r['id']}` ({r['assignee'] or '?'}) "
+            f"is blocked `needs_input` (recurrence {r['block_recurrences']}). "
+            f"— {(r['title'] or '')[:80]}"
+        )
+        lines.append(f"  Decision/evidence: {reason or 'see the card body'}")
+        if body:
+            lines.append(f"  Card evidence: {body}")
+        lines.append(f"  Reply: `unblock {r['id']}` to run it again, or update/archive the card.")
+        ceiling_seen[decision_key] = int(now)
 
     # 2. held > 48h, daily reminder
     try:

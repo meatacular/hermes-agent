@@ -597,6 +597,365 @@ def on_block(task_id: str = "", assignee: str | None = None, reason: str | None 
     _spawn(OVERWATCH, _overwatch_prompt(task_id, card, reason, why, brief_path, brief), task_id)
 
 
+# ----------------------------------------------------------------------------------------------
+# 2026-09-16, card t_2da01ffe: AC1's second path, without a core patch -------------------------
+#
+# The duplicate decider is not a second SPAWN — `_spawn` above is the only spawn path and it ran
+# once in both measured cases. It is the tui notification poller running an agent TURN in the
+# standing desktop session (`tui_gateway/session_notifications.py:546` -> `:364` `_notif_poll_kanban`
+# -> `_notif_submit`, "run the buffered batch as a turn if idle"). `tui_gateway/` fires no plugin
+# hook on that path, `delivery_mode` is never read there, and the poller's turn claim lives in the
+# desktop process's memory — so a plugin CANNOT stop the turn. Core is the only place that could,
+# and a core patch is forbidden (decision-autonomy, 2026-09-16: "never hermes source code").
+#
+# What a plugin CAN do is make the second turn harmless, which is what this section does:
+#
+#   * `pre_llm_call`  — the awareness line. When the turn's own user message IS a kanban
+#     notification for a card whose assessment lease is live, the escalation state is injected into
+#     that message: this is awareness, not an instruction.
+#   * `pre_tool_call` — the enforcement. A write to that card from any session that is not the
+#     assessor is refused while the assessor holds it. Reads are untouched.
+#
+# Scope is measured, not assumed. BOTH recorded duplicates did their board work through `terminal`
+# running the kanban CLI — `hermes kanban unblock t_8dd715c6` (15:20:28), `hermes kanban reassign
+# t_8dd715c6 bob` (15:20:34), `hermes kanban unblock/reassign/reopen t_0a677768` (14:58:51) — and
+# through `sqlite3 kanban.db` writes to the card body ("AC3 clarified: True | ACs 7/8 added: True",
+# 14:58:39; "AC2 rescoped: True | AC5 rescoped: True | block added: True", 15:20:17), plus kanban
+# tools (`kanban_comment` 2132/2141, `kanban_link`). A gate on kanban TOOLS alone would have
+# refused none of the measured changes, so all three surfaces are guarded.
+#
+# Residual, stated rather than implied: a session that writes through a path this gate cannot
+# recognise (an arbitrary script, `execute_code` calling `kanban_db` in-process) is not stopped, and
+# `kanban_create` is deliberately ungated, so a duplicate session can still mint a second card.
+# The gate refuses what it can SEE and names the reason; the airtight fix is the poller itself,
+# which is core, and therefore Richie's call — not something this plugin can carry.
+#
+# THE BACKSTOP, AND ITS TIMING (fleet-control-change rule 13): the ceiling counter (`is_hard_stop`,
+# author-agnostic since `07c72dfa`) counts decisions. A write that slips past this gate is counted
+# there and the card reaches its ceiling — but the counter reads what has ALREADY landed, so it
+# fires after the second decision, not before it. Nothing else acts earlier: the lease refuses a
+# duplicate SPAWN and this gate refuses a duplicate WRITE to the assessed card, and those two are
+# the only controls on this path. Which is why the residual above is stated rather than dressed up:
+# for an unrecognised write path there is no before-the-harm control at all.
+#
+# Fail OPEN on internal error (the `kanban-mint-guard` precedent): this gate protects one card from
+# a duplicate decision, it is not a security boundary, and a guard that refuses the whole board
+# when it has a bad day is worse than the defect it prevents.
+
+AWARENESS_MARK = "[kanban-block-escalator — AWARENESS-ONLY TURN]"
+
+# Kanban TOOLS that change a card's state. Deliberately NOT here: kanban_show / kanban_list /
+# kanban_attachments (reads), kanban_heartbeat (a running card's liveness, and a leased card is
+# blocked), kanban_create (a new card — the idempotency key below is the existing remedy for a
+# duplicate mint, and refusing it would stop unrelated minting).
+WRITE_TOOLS = frozenset({
+    "kanban_unblock", "kanban_block", "kanban_complete", "kanban_request_review",
+    "kanban_request_changes", "kanban_comment", "kanban_link", "kanban_attach",
+    "kanban_attach_url",
+})
+_TARGET_ID_KEYS = ("task_id", "tid", "id", "parent_id", "child_id")
+
+TASK_ID_RE = re.compile(r"\bt_[0-9a-z]{6,16}\b")
+
+# `hermes kanban <verb>` — the disposition verbs, i.e. everything that decides something about a
+# card. Reads (`show`, `list`, `log`, `runs`, `tail`, `stats`, `attachments`, `context`,
+# `notify-list`, `assignees`, `diagnostics`, `export`) are absent on purpose.
+#
+# MATCHED AS TOKENS, not as text. The first version was one regex anchored on `\bkanban\b`, and the
+# population sweep (63 lost hits, every one read) showed what that costs in both directions:
+#
+#   * false positives it refused — `git commit -m "…kanban-block-escalator…"` (`-block-` is a word
+#     boundary) and `sqlite3 kanban.db "SELECT '  comment '||id …"`, a READ, refused by a gate whose
+#     whole point is to leave reads alone;
+#   * real writes it MISSED after being tightened to `hermes kanban` — the fleet has three spellings
+#     in the recorded corpus: `hermes kanban unblock t_X`, `python3 -m hermes_cli kanban set-cap
+#     t_X 1.50 …` (2026-09-14 20:18), and `HB=…/venv/bin/hermes; "$HB" kanban block t_X …`
+#     (2026-09-16 20:32).
+#
+# So: split the command into shell segments, tokenise, and require a BARE `kanban` token whose
+# predecessor is the binary (by name, by path, or by a variable expansion standing in for it). That
+# is what makes `kanban.db` a read and `"$HB" kanban block` a write.
+CLI_WRITE_VERBS = frozenset({
+    "unblock", "block", "complete", "assign", "reassign", "reopen-review", "request-review",
+    "request-changes", "promote", "archive", "claim", "reclaim", "link", "unlink", "comment",
+    "edit", "schedule", "set-cap", "set-model",
+})
+_SHELL_SEGMENT_RE = re.compile(r"[\n;|&]")
+_HERMES_TOKENS = frozenset({"hermes", "hermes_cli"})
+
+# Direct writes to the BOARD database, two more measured shapes:
+#   `sqlite3 kanban.db "UPDATE tasks SET body=…"` (14:58:39 and 15:20:17 in this card's forensics)
+#   `from hermes_cli import kanban_db as kb … kb.complete_task(conn, tid)` — measured 7 times in the
+#   last 30 days (`complete_task` x4, `unlink_tasks` x4, `add_comment` x2, `link_tasks`, `unblock_task`)
+BOARD_DB_RE = re.compile(r"kanban\.db\b")
+_SQL_TABLES = r"(?:tasks|task_comments|task_links|task_events|task_runs)"
+# SQLite's conflict clause sits BETWEEN the verb and its target — `INSERT OR IGNORE INTO task_links
+# …`. Without it here the rule missed the one genuine write in the whole 67-clause delta (found by
+# auditing every loss against the corpus, not by reading the two quoted examples): the fleet's own
+# link-restore call of 2026-09-14. A tightening may not lose a write it can plainly see.
+_SQL_CONFLICT = r"(?:\s+OR\s+(?:IGNORE|REPLACE|ABORT|FAIL|ROLLBACK))?"
+SQL_WRITE_RE = re.compile(
+    r"(?:UPDATE" + _SQL_CONFLICT + r"\s+" + _SQL_TABLES + r"\s+SET\b"
+    r"|(?:INSERT|REPLACE)" + _SQL_CONFLICT + r"\s+INTO\s+" + _SQL_TABLES + r"\b"
+    r"|DELETE\s+FROM\s+" + _SQL_TABLES + r"\b"
+    r"|(?:DROP|ALTER|TRUNCATE)\s+TABLE\s+" + _SQL_TABLES + r"\b)",
+    re.IGNORECASE,
+)
+# A statement SHAPE, not the bare keyword: `kind='update'` inside a SELECT is a read, and the first
+# version of this rule refused that SELECT (found by the population sweep, not by a unit test).
+# Unqualified on purpose — the calls in the corpus are written `kb.complete_task(...)` after
+# `from hermes_cli import kanban_db as kb`, so requiring the `kanban_db.` qualifier missed every one.
+KANBAN_API_WRITE_RE = re.compile(
+    r"\.(?:unblock_task|block_task|complete_task|assign_task|reassign_task|reopen_review|"
+    r"request_review|request_changes|link_tasks|unlink_tasks|add_comment|archive_task|"
+    r"claim_task|reclaim_task|update_task|set_max_cost|set_cap)\w*\s*\("
+)
+# A segment whose first token is a prose emitter cannot be an invocation: `echo "run hermes kanban
+# unblock t_x"` documents a command, it does not run one.
+_PROSE_TOKENS = frozenset({"echo", "printf", "logger", ":"})
+
+NOTIFICATION_RE = re.compile(r"Kanban\s+(t_[0-9a-z]{6,16})\s+blocked\b")
+
+
+def _held_lease(task_id: str) -> tuple[bool, int | str]:
+    """(held?, holder) — `_claim_state` is the ONE reader of the lease, and this is its only caller
+    for a card other than the card being escalated."""
+    state, holder = _claim_state(_claim_path(task_id))
+    return state == "held", holder
+
+
+def escalation_in_flight(task_id: str) -> tuple[bool, int | str]:
+    """(in flight?, holder) — a HELD lease on a card that is STILL AWAITING the escalation.
+
+    The second half is not decoration. "An assessment is in flight" is two facts, and the lease
+    alone is only one of them: the assessor's job is to resolve the block, so the moment the card
+    stops being blocked the assessment is over — but the claim file can outlive it. Measured on
+    the live board at 21:40-21:52 today: `t_46783f69` blocked on `cost_cap`, an assessor was
+    spawned from the ROOT GATEWAY (which still runs pre-`07c72dfa` code, so its claim records the
+    gateway's own long-lived pid rather than the child's), the assessor extended the cap and
+    unblocked the card, the dispatcher started a worker on it 90 seconds later — and that worker
+    would have been REFUSED its own comment and completion for the rest of the 15-minute TTL by a
+    gate aimed at a duplicate decider that no longer existed.
+
+    A refusal that strands the card's own worker is a worse failure than the one this gate
+    prevents, so the gate stands down whenever the card is no longer blocked (`_is_truly_blocked`,
+    which treats `triage` as blocked and `operator_hold`/`dependency`/`scheduled` as they are).
+    Every measured duplicate decided its card WHILE THAT CARD WAS BLOCKED — the poller's own write
+    was the unblock — so the window this closes is not the window the defect lives in.
+
+    Fails OPEN, like every other path here: an unreadable board allows the call.
+    """
+    state, holder = _claim_state(_claim_path(task_id))
+    if state != "held":
+        return False, holder
+    if not _is_truly_blocked(_card(task_id)):
+        return False, holder
+    return True, holder
+
+
+def is_assessor(task_id: str) -> bool:
+    """Is THIS process the session the escalation was spawned for?
+
+    Two rungs, both established by `_spawn`: it starts the assessor directly, so the pid in the
+    claim IS the assessor's; and it exports `HERMES_OVERWATCH_TASK`. The env rung matters as much as
+    the pid rung — a `hermes kanban` call the assessor makes through `terminal` is a CHILD process,
+    inherits the variable, and must never be refused by this gate.
+    """
+    if (os.environ.get("HERMES_OVERWATCH_TASK") or "").strip() == task_id:
+        return True
+    held, holder = _held_lease(task_id)
+    return bool(held and isinstance(holder, int) and holder == os.getpid())
+
+
+def _is_hermes_binary_token(token: str) -> bool:
+    """The token a bare `kanban` subcommand token must follow to be a CLI invocation."""
+    t = token.strip("\"'")
+    if not t:
+        return False
+    if t in _HERMES_TOKENS or t.endswith("/hermes") or t.endswith("/hermes_cli"):
+        return True
+    # A variable standing in for the binary — measured spelling `HB=…/hermes; "$HB" kanban block`.
+    return t.startswith("$") or t.startswith("(") or t.startswith("`")
+
+
+def _cli_write_in(command: str) -> bool:
+    """Does any shell segment invoke `<hermes> kanban <write verb>`? Tokens, never substrings."""
+    for segment in _SHELL_SEGMENT_RE.split(command):
+        tokens = segment.replace('"', " ").replace("'", " ").split()
+        if not tokens or tokens[0] in _PROSE_TOKENS:
+            continue
+        for index, token in enumerate(tokens):
+            if token != "kanban":
+                continue
+            if index == 0 or not _is_hermes_binary_token(tokens[index - 1]):
+                continue
+            rest = {t.strip("\"'") for t in tokens[index + 1:]}
+            if rest & CLI_WRITE_VERBS:
+                return True
+    return False
+
+
+def _terminal_write_targets(command: str) -> tuple[set[str], str]:
+    """(the card ids this shell command would WRITE, what kind of write) — reads give ({}, "").
+
+    Three recognised write surfaces, each anchored on its own thing and each a SHAPE rather than a
+    keyword (a keyword match is how a gate ends up refusing reads — see the CLI section above and
+    SQL_WRITE_RE). Anything else returns no targets: an unrecognised path is a residual, stated in
+    the section comment above, never a guess.
+    """
+    if "kanban" not in command:
+        return set(), ""
+    ids = set(TASK_ID_RE.findall(command))
+    if not ids:
+        return set(), ""
+    if _cli_write_in(command):
+        return ids, "`hermes kanban` write"
+    if BOARD_DB_RE.search(command) and SQL_WRITE_RE.search(command):
+        return ids, "SQL write to the board database"
+    if "kanban_db" in command and KANBAN_API_WRITE_RE.search(command):
+        return ids, "kanban_db API write"
+    return set(), ""
+
+
+def _tool_write_targets(tool_name: str, args: dict) -> set[str]:
+    if tool_name not in WRITE_TOOLS:
+        return set()
+    found = set()
+    for key in _TARGET_ID_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.startswith("t_"):
+            found.add(value)
+        elif isinstance(value, (list, tuple)):
+            found.update(str(v) for v in value if isinstance(v, str) and v.startswith("t_"))
+    return found
+
+
+def writes_to_leased_card(tool_name: str, args: dict) -> tuple[str, str, int | str] | None:
+    """(task_id, surface, holder) when this call would WRITE to a card under a live lease, else None.
+
+    The decision, in one place and unit-tested directly: a write surface, a card that is leased, and
+    a caller that is not the assessor. Any one of the three missing -> None (allow).
+    """
+    if tool_name == "terminal":
+        candidates, surface = _terminal_write_targets(str(args.get("command") or ""))
+    else:
+        candidates, surface = _tool_write_targets(tool_name, args), tool_name
+    if not candidates:
+        return None
+    for task_id in sorted(candidates):
+        if is_assessor(task_id):
+            continue
+        in_flight, holder = escalation_in_flight(task_id)
+        if in_flight:
+            return task_id, surface, holder
+    return None
+
+
+def refusal_message(task_id: str, surface: str, holder: int | str) -> str:
+    return (
+        f"REFUSED — awareness-only (kanban-block-escalator).\n\n"
+        f"An overwatch assessment for {task_id} is IN FLIGHT: the briefed assessor (pid {holder}) "
+        f"holds this card's escalation lease, taken when the card blocked and released the moment "
+        f"that process exits (15-minute backstop).\n\n"
+        f"One block, one escalation. This call ({surface}) would change {task_id}'s state from a "
+        f"session that is not the assessor, so it is refused — a second session deciding the same "
+        f"card is what produced two decisions where there should be one (measured on t_b6ebc5ec, "
+        f"t_0a677768 and t_8dd715c6). The notification that woke this session is awareness, not an "
+        f"instruction.\n\n"
+        f"Refused on this card: unblock / block / assign / reassign / complete / re-review / "
+        f"archive / relink / edit / set-cap / comment, by tool or by `hermes kanban` or by a direct "
+        f"kanban.db write.\n"
+        f"Unaffected: every read (`kanban show`, `hermes kanban show|list|log|runs|tail|stats`, "
+        f"SELECT), and every other card.\n\n"
+        f"To proceed: re-check {task_id} once the assessment clears (the lease is gone when the "
+        f"assessor exits), or use the Hermes Desktop kanban pane's own buttons, which do not pass "
+        f"through plugin hooks. If this refusal is wrong for this card, say so on the card once the "
+        f"lease clears — this gate only ever acts while an assessment is live."
+    )
+
+
+def awareness_line(task_id: str, holder: int | str) -> str:
+    """The line injected into the second session's own turn — the awareness half of AC1."""
+    return (
+        f"{AWARENESS_MARK}\n"
+        f"The escalation for card {task_id} is IN FLIGHT: a briefed overwatch session (pid {holder}) "
+        f"holds this card's assessment lease. This notification is awareness, not an instruction. Do "
+        f"NOT unblock, block, assign, reassign, complete, re-review, archive, relink, edit, cap or "
+        f"comment on {task_id} from this session, and do not run a `hermes kanban` write or a "
+        f"kanban.db write against it — those are refused while the lease is live, and a second "
+        f"decision on a card is the defect this fleet already paid for three times today. Surface "
+        f"the notification if it needs a human; otherwise read what you need and wait. The lease "
+        f"clears when the assessor exits."
+    )
+
+
+def _notification_text(user_message) -> str:
+    """The turn's user message as text — string, or a multimodal list of parts."""
+    if isinstance(user_message, str):
+        return user_message
+    if isinstance(user_message, (list, tuple)):
+        parts = []
+        for item in user_message:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+        return "\n".join(parts)
+    return ""
+
+
+def awareness_note(user_message) -> str | None:
+    """(the awareness line) when this turn IS a kanban notification for a leased card, else None.
+
+    Only the HEAD of the message is read: a notification opens with it, and a body that merely
+    mentions "Kanban t_x blocked" later on is prose, not a wake-up.
+    """
+    text = _notification_text(user_message)
+    if "Kanban" not in text:
+        return None
+    for match in NOTIFICATION_RE.finditer(text[:1000]):
+        task_id = match.group(1)
+        if is_assessor(task_id):
+            continue
+        in_flight, holder = escalation_in_flight(task_id)
+        if in_flight:
+            return awareness_line(task_id, holder)
+    return None
+
+
+def on_pre_llm_call(**payload) -> dict | None:
+    """`pre_llm_call` — inject the awareness line into the duplicate session's own turn."""
+    try:
+        note = awareness_note(payload.get("user_message"))
+        if not note:
+            return None
+        logger.info("kanban-block-escalator: awareness-only turn (session=%s platform=%s)",
+                    payload.get("session_id"), payload.get("platform"))
+        return {"context": note}
+    except Exception:  # noqa: BLE001
+        logger.exception("kanban-block-escalator: awareness note failed, continuing without it")
+        return None
+
+
+def on_pre_tool_call(**payload) -> dict | None:
+    """`pre_tool_call` — refuse a write to a card whose assessment lease is live."""
+    try:
+        tool_name = str(payload.get("tool_name") or "")
+        args = payload.get("args")
+        hit = writes_to_leased_card(tool_name, args if isinstance(args, dict) else {})
+        if not hit:
+            return None
+        task_id, surface, holder = hit
+        logger.warning("kanban-block-escalator: awareness-only refusal — %s would write to %s "
+                       "(lease holder %s)", surface, task_id, holder)
+        return {"action": "block", "message": refusal_message(task_id, surface, holder)}
+    except Exception:  # noqa: BLE001
+        logger.exception("kanban-block-escalator: awareness gate error, allowing")
+        return None
+
+
 def register(ctx) -> None:
-    """Register the kanban_task_blocked lifecycle hook."""
+    """Register the escalation trigger and the awareness-only gate."""
     ctx.register_hook("kanban_task_blocked", on_block)
+    ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    ctx.register_hook("pre_tool_call", on_pre_tool_call)

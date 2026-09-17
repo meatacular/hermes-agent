@@ -131,9 +131,8 @@ def test_selftest_passes():
     assert ok, msg
 
 
-def test_apply_blocks_actionable_and_is_idempotent(db):
-    """A live (todo, never-run) build-lane->rodge card is commented+blocked ONCE;
-    a second apply run is a no-op (no duplicate comment)."""
+def test_apply_reports_actionable_without_blocking_and_is_idempotent(db):
+    """A live mismatch gets one audit comment and never blocks the card."""
     mint(db, "t_live", "[Bob] Implement live-flag check", '{"assignee": "rodge"}')
     flags, _ = aw.scan(db, 30)
     acted, refused = aw.apply_actions(db, flags, commit=True)
@@ -141,11 +140,12 @@ def test_apply_blocks_actionable_and_is_idempotent(db):
 
     assert len(acted) == 1 and acted[0]["id"] == "t_live"
     row = db.execute("SELECT status, block_kind FROM tasks WHERE id='t_live'").fetchone()
-    assert row["status"] == "blocked" and row["block_kind"] == "needs_input"
+    assert row["status"] == "todo"
+    assert row["block_kind"] is None
     n = db.execute("SELECT COUNT(*) n FROM task_comments WHERE task_id='t_live'").fetchone()["n"]
     assert n == 1
     n_ev = db.execute("SELECT COUNT(*) n FROM task_events WHERE task_id='t_live' AND kind='blocked'").fetchone()["n"]
-    assert n_ev == 1
+    assert n_ev == 0
 
     # idempotent: already flagged => skipped
     acted2, _ = aw.apply_actions(db, flags, commit=True)

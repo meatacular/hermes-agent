@@ -1,0 +1,64 @@
+name: review-round-cap
+version: 1.0.0
+kind: backend
+provides_hooks:
+  - pre_tool_call
+author: Agent Smith for Richie, 2026-09-16
+description: >-
+  The review round cap, enforced by CODE instead of by the reviewer's judgement.
+
+  Card t_eb7a5c8c. The cap was a CONVENTION: nothing in `hermes_cli/` or
+  `tools/kanban_tools.py` enforced it, and `sdlc-review` set a *lens* per round, never a
+  ceiling. In one day the same unwritten rule produced three different outcomes — a
+  reviewer escalated instead of bouncing (t_d5cdd9f2), two changes_requested then a third
+  round ran anyway (t_7540af48), and a builder completed after changes_requested with no
+  re-review at all (t_b264ec8b). A rule that cannot be enforced cannot be waived
+  consistently and cannot be tested: it is the decorative-gate class — it reads like a
+  control and behaves like a mood.
+
+  THE CONTROL. `kanban.max_review_rounds` (this file is where its default, 3, is
+  documented; the key itself is declared on every profile — the scoping law). It counts
+  ROUNDS, so the default permits rounds 1, 2 and 3 — bounces 1 and 2 — and the THIRD
+  bounce is refused, because it would open round 4. A card sitting at exactly the cap is
+  the refused case.
+
+  WHAT IT READS. `round_now = bounces + 1`, where `bounces` is the count of `task_runs`
+  rows on the card with `outcome = 'changes_requested'`. That is the number `sdlc-review`
+  already tells a reviewer to derive, so the guard counts what the reviewer counts. No new
+  state is invented, and no second opinion is formed.
+
+      allowed_bounces = (max_review_rounds - 1) + authorised_extra_rounds
+
+  ON A REFUSAL. `pre_tool_call` returns `{"action": "block", "message": ...}`; the message
+  names the escalation path (`kanban_block(kind="needs_input")` spawns overwatch on the
+  FIRST block — a kind-less block is silently ignored the first time) and the recorded
+  bypass. The refusal is ALSO written to the card as a comment, so it is visible on the
+  board and not only in the reviewer's head.
+
+  THE BYPASS IS A RECORDED ACT, NOT AN UNWRITTEN STYLE. Overwatch authorises a further
+  round by posting a comment whose FIRST non-blank line is
+
+      review-round-extension: <who> +1 — <convergence evidence, closed per round>
+
+  One authorisation buys exactly one further round. The marker must carry a real grantor
+  token and a count, and it is read only from the start of a comment's first line — so a
+  body that merely MENTIONS the marker (including this guard's own refusal text, which
+  quotes it) grants nothing.
+
+  WHY THIS IS A PLUGIN AND NOT THE CORE PATCH THE FINDING IMPLIES. The go/no-go ladder is
+  plugin -> watchdog -> skill -> soul -> config; a core patch is never the fallback, and
+  `pre_tool_call` is the hook `review-delta-guard`, `kanban-mint-guard` and
+  `kanban-project-link-guard` already use for exactly this class of defect. The upstream
+  kernel is untouched: zero merge surface for the next catch-up.
+
+  SCOPE. Only `kanban_request_changes`, and only while the card is in an active review
+  round (`status == 'running'` with a `review_requested` outcome on record). Otherwise the
+  kernel's own, more precise refusal is the right error and this guard stays silent.
+  Fail-OPEN everywhere: an unreadable store, a malformed config, an unreadable comment
+  store, any exception at all — the call proceeds exactly as it does today. A guard that
+  stops the review lane is worse than the decorative cap it replaces. Nothing else about
+  the review lane changes: a bounce WITHIN the cap is untouched, and no gate is waived.
+
+  kind: backend so it loads in every profile AND every kanban worker — a plugin dropped in
+  ~/.hermes/plugins is invisible to workers (the lesson of the 09-09 to 09-11 completion
+  gate, which was a silent no-op for exactly that reason).

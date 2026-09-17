@@ -4,8 +4,8 @@
 Detection complement to the mint-time guard (C1). C1 stops NEW misassignments at
 mint; this daily scan catches any that still slip through — an LLM emit under an
 override, a lane verb the role-map does not cover, or a card minted before C1
-shipped. It only FLAGS and, when a mismatch is actionable, BLOCKS for the PM to
-re-route. It never mutates another card's assignee.
+shipped. It only FLAGS and reports mismatches for the PM to re-route. It never
+mutates card status or assignee; routing is a human decision.
 
 What it reads
 -------------
@@ -33,16 +33,17 @@ Action taken
 ------------
 For each flagged card still actionable (status not done/archived, no completed
 run), the script posts a `## [routing-audit] mismatch` comment naming
-expected-vs-actual and blocks it kind=needs_input for Jobsy to re-route.
-Idempotent: it writes a marker into the comment (task id + window) and skips a
-card that already carries this run's marker, so a daily re-scan never dups.
+expected-vs-actual. It never changes status or writes a blocked event; routing
+is the PM's decision.
+Idempotent: it skips a card that already carries the routing-audit mismatch
+marker, so a daily re-scan never duplicates the report.
 
 Usage:
     assignee-mismatch-watch.py                 # silent cron default (last 24h)
     assignee-mismatch-watch.py --days 7        # 7-day baseline, report to stdout
     assignee-mismatch-watch.py --audit         # always print full mismatch table
     assignee-mismatch-watch.py --selftest      # exit 0/1 on self-test fixtures
-    assignee-mismatch-watch.py --apply         # comment+block actionable flags
+    assignee-mismatch-watch.py --apply         # comment actionable flags (never changes status)
     assignee-mismatch-watch.py --gap           # also list auto-decomposer gaps
 
 Exit code is 0 unless --selftest fails. Watchdog pattern: empty stdout = silent.
@@ -248,7 +249,7 @@ def implied_lane(title, body):
         if pat.search(t):
             return lane
     # Body owner marker (authoritative when present).
-    m = BODY_OWNER_RE.search((body or "")[:400])
+    m = BODY_OWNER_RE.search((body.decode(errors="replace") if isinstance(body, bytes) else str(body or ""))[:400])
     if m:
         name = (m.group(1) or "").lower()
         if "rodge" in name:
@@ -275,11 +276,47 @@ def implied_lane(title, body):
     return None
 
 
+LANE_EVENT_KINDS = {"review_requested", "changes_requested"}
+
+
+def newest_lane_owner(con, task_id):
+    """Return (lane, expected owner, event kind) from the newest lane event."""
+    row = con.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id=? "
+        "AND kind IN (?, ?) ORDER BY id DESC LIMIT 1",
+        (task_id,) + tuple(sorted(LANE_EVENT_KINDS)),
+    ).fetchone()
+    if row is None:
+        return None, None, None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if row["kind"] == "review_requested":
+        owner = payload.get("reviewer")
+        return "review", owner if isinstance(owner, str) else ROLE_MAP["review"], row["kind"]
+    owner = payload.get("implementer")
+    return "build", owner if isinstance(owner, str) else ROLE_MAP["build"], row["kind"]
+
+
 def classify(con, task_id, title, body, payload, status, created_at):
     """Return a dict describing one card's routing decision."""
     mint, src = mint_assignee(con, task_id, payload)
-    lane = implied_lane(title, body)
-    expected = ROLE_MAP.get(lane) if lane else None
+    event_lane, event_expected, lane_event = newest_lane_owner(con, task_id)
+    # A review request changes the current assignee, but does not change the
+    # card's declared implementation lane. Only a return from review is a
+    # durable lane transition that must override the title/body declaration.
+    if lane_event == "changes_requested":
+        lane, expected = event_lane, event_expected
+    elif lane_event == "review_requested":
+        # Review ownership is already managed by the review transition; do not
+        # compare the mint-time owner with the reviewer's current assignment.
+        lane, expected = None, None
+    else:
+        lane = implied_lane(title, body)
+        expected = ROLE_MAP.get(lane) if lane else None
     return {
         "id": task_id,
         "status": status,
@@ -289,6 +326,7 @@ def classify(con, task_id, title, body, payload, status, created_at):
         "mint_src": src,
         "lane": lane,
         "expected": expected,
+        "lane_event": lane_event,
         "flag": False,
         "reason": None,
     }
@@ -363,13 +401,11 @@ def scan(con, days):
 
 
 def actionable(con, c):
-    """Card still worth flagging/blocking (not done/archived, nothing ran).
+    """Card still worth reporting (not done/archived, nothing ran).
 
-    A ``running`` card is NEVER actionable: blocking it moves the row out from
-    under a live worker, which the lifecycle does not expect and which no
-    supported call would ever do. A mis-routed card that is already running has
-    lost the argument for pre-emptive blocking anyway — it gets reported, and
-    the mismatch comment is enough for the PM.
+    A ``running`` card is NEVER actionable: writing a report while a worker is
+    live is unnecessary, and the lifecycle does not expect a watchdog to alter
+    its row. A mismatch comment is enough for the PM.
     """
     if c["status"] in ("done", "archived", "gave_up", "running"):
         return False
@@ -407,42 +443,18 @@ def _post_comment(con, c):
     )
 
 
-def _block(con, c):
-    """Block the card kind=needs_input so it surfaces for the PM to re-route.
-
-    Mirrors the lifecycle's public block writes: set tasks.block_kind, move the
-    row to status 'blocked', and append a 'blocked' task_event. Idempotent guard
-    lives in the caller (already_flagged / actionable)."""
-    now = int(time.time())
-    con.execute("UPDATE tasks SET block_kind='needs_input', status='blocked' WHERE id=?",
-                (c["id"],))
-    con.execute(
-        "INSERT INTO task_events(task_id, kind, payload, created_at) VALUES(?,?,?,?)",
-        (c["id"], "blocked",
-         json.dumps({"reason": c["reason"], "kind": "needs_input",
-                     "recurrences": 0, "source_status": c["status"],
-                     "by": "assignee-mismatch-watch"}),
-         now),
-    )
-
-
 MAX_APPLY_DEFAULT = 3
 
 
 def apply_actions(con, flags, commit=True, max_apply=MAX_APPLY_DEFAULT):
-    """Comment + block each actionable mismatch. Returns (acted, refused).
+    """Report mismatches without mutating cards. Returns (reported, refused).
 
-    Idempotent: a card already carrying the [routing-audit] mismatch marker is
-    skipped, so a daily re-scan never duplicates a flag. Only actionable cards
-    (not done/archived/running, nothing ran, not already held) are touched.
+    The auditor is deliberately report-only: routing remains the PM's decision.
+    Existing marker checks prevent duplicate comments, while no status or event
+    write is performed.
 
-    BLAST-RADIUS CAP. If more than ``max_apply`` cards would be acted on, NONE
-    are: the run writes nothing and returns them as ``refused``. Many
-    simultaneous "mis-routings" is far more likely to be this auditor
-    misclassifying than the board genuinely mis-routing a batch, and the failure
-    mode of being wrong at scale here is a blocked board. On 2026-09-06 an
-    unguarded sweep wrote nine cards before anyone looked. Report loudly, write
-    nothing, let a human decide.
+    The cap still limits comment volume. A mismatch is never turned into a
+    status transition by this auditor.
     """
     candidates = [c for c in flags
                   if actionable(con, c) and not already_flagged(con, c)]
@@ -451,7 +463,6 @@ def apply_actions(con, flags, commit=True, max_apply=MAX_APPLY_DEFAULT):
     acted = []
     for c in candidates:
         _post_comment(con, c)
-        _block(con, c)
         acted.append(c)
     if commit and acted:
         con.commit()
@@ -478,7 +489,7 @@ def render_table(flags, gaps, show_headers=True):
 
 
 def run(args):
-    # --apply needs write access (post comment + block); default is read-only.
+    # --apply permits report comments; it never changes status or assignee.
     con = sqlite3.connect(KANBAN_DB if args.apply else f"file:{KANBAN_DB}?mode=ro", uri=not args.apply)
     con.row_factory = sqlite3.Row
     flags, gaps = scan(con, args.days)
@@ -489,13 +500,13 @@ def run(args):
         acted, refused = apply_actions(con, flags, max_apply=args.max_apply)
         con.close()
         if refused:
-            print(f"[routing-audit] REFUSED TO ACT: {len(refused)} cards would have been "
-                  f"blocked, over the --max-apply cap of {args.max_apply}. Nothing was "
+            print(f"[routing-audit] REFUSED TO REPORT: {len(refused)} cards would have been "
+                  f"commented, over the --max-apply cap of {args.max_apply}. Nothing was "
                   f"written. This many at once usually means the auditor is wrong, not the "
                   f"board. Review before raising the cap.\n{body}")
             return body, []
         if acted:
-            print(f"[routing-audit] flagged+blocked {len(acted)} actionable mismatch(es) "
+            print(f"[routing-audit] reported {len(acted)} actionable mismatch(es) "
                   f"for Jobsy to re-route. Full table:\n{body}")
         else:
             print(body or "no actionable mismatches (all flags already done/archived/held)")
@@ -576,9 +587,38 @@ def run_selftest():
                     (tid, title, body, json.loads(payload).get("assignee"), "todo", now - i))
         con.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,?,?,?)",
                     (tid, "created", payload, now - i))
+    # Lane-history fixtures exercise the newest-event rule. A review request
+    # followed by a return to the implementer is not a mismatch; a lone review
+    # request must still be judged from the declared lane, not the reviewer.
+    lane_fixtures = [
+        # The title alone implies review, but the newest return event restores
+        # the implementer lane. Removing newest_lane_owner makes this red.
+        ("t_st_review_return", "Review-lane rework handoff", "bob", [
+            ("review_requested", '{"reviewer":"rodge","implementer":"bob"}'),
+            ("changes_requested", '{"implementer":"bob","reviewer":"rodge"}'),
+        ], False),
+        # A review request is not a new implementation lane; the declared title
+        # remains authoritative for the mint-time audit.
+        ("t_st_review_only", "Review-lane implementation", "bob", [
+            ("review_requested", '{"reviewer":"rodge","implementer":"bob"}'),
+        ], False),
+        # Genuine control case: verify lane minted to rodge remains reportable.
+        ("t_st_verify_misroute", "Verify release candidate", "rodge", [], True),
+    ]
+    for tid, title, assignee, events, expect in lane_fixtures:
+        con.execute("INSERT INTO tasks(id,title,body,assignee,status,created_at) VALUES(?,?,?,?,?,?)",
+                    (tid, title, "", assignee, "todo", now))
+        con.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,?,?,?)",
+                    (tid, "created", json.dumps({"assignee": assignee}), now))
+        for kind, event_payload in events:
+            con.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,?,?,?)",
+                        (tid, kind, event_payload, now))
     con.commit()
     flags, gaps = scan(con, 30)
     flag_ids = {c["id"] for c in flags}
+    for tid, _title, _assignee, _events, expect in lane_fixtures:
+        if (tid in flag_ids) != expect:
+            failures.append(f"{tid}: expected flag={expect} got flag={tid in flag_ids}")
     for i, (title, body, payload, expect) in enumerate(D["fake"]):
         tid = f"t_st{i}"
         flagged = tid in flag_ids
@@ -590,7 +630,7 @@ def run_selftest():
     con.close()
     if failures:
         return False, "SELF-TEST FAILED\n" + "\n".join("  ✗ " + f for f in failures)
-    return True, f"self-test OK: {len(D['fake'])} cases, "
+    return True, f"self-test OK: {len(D['fake']) + len(lane_fixtures)} cases, "
     f"{len(flag_ids)} flagged all correct, 0 false positives on legit review/verify/triage/deploy cards"
 
 
@@ -600,12 +640,12 @@ def main(argv=None):
     ap.add_argument("--audit", action="store_true", help="print full mismatch table always")
     ap.add_argument("--gap", action="store_true", help="also report auto-decomposer gap cards")
     ap.add_argument("--apply", dest="apply", action="store_true", default=False,
-                    help="comment+block actionable flags. OFF by default: the safe state is the "
-                         "default, so a caller that forgets a flag reports rather than writes.")
+                    help="comment actionable flags (never changes status). OFF by default: the "
+                         "safe state is the default, so a caller that forgets a flag reports rather than writes.")
     ap.add_argument("--no-apply", dest="apply", action="store_false",
                     help="report-only: never mutate cards")
     ap.add_argument("--max-apply", type=int, default=MAX_APPLY_DEFAULT,
-                    help=f"refuse to write at all if more than N cards would be blocked "
+                    help=f"refuse to write at all if more than N audit comments would be posted "
                          f"(default {MAX_APPLY_DEFAULT}); blast-radius cap")
     ap.add_argument("--selftest", action="store_true", help="run self-test fixtures and exit")
     args = ap.parse_args(argv)

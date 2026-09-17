@@ -195,3 +195,150 @@ def test_reservation_is_reaped_once_its_grace_expires(monkeypatch, tmp_path):
     path.write_text(json.dumps({"pid": 0, "created_at": now - mod.CLAIM_SPAWN_GRACE_SECONDS - 1,
                                 "reason": "spawn", "state": "reserved"}))
     assert mod._claim_overwatch("t_res", "capability") is True, "a stale reservation is reaped"
+
+
+# --- 2026-09-16, card t_2da01ffe, AC1's second path (plugin-side) -------------------
+#
+# The duplicate decider is not a second SPAWN — `_spawn` is the only spawn path and it ran once in
+# each measured case. It is the tui notification poller running an agent TURN in the standing
+# desktop session. `tui_gateway/` fires no plugin hook on that path and `delivery_mode` is never
+# read there, so a plugin cannot STOP the turn; what it can do is make the turn harmless: inject
+# the awareness line (`pre_llm_call`) and refuse a WRITE to the card whose assessment is in
+# flight (`pre_tool_call`). The tests below pin the refusal, the exemptions, the read surface, and
+# the boundary the corpus sweep drew (a documented command is not a run command).
+#
+# `LIVE_PID` is the holder used throughout: a pid that is alive but is NOT this test process, so
+# `is_assessor`'s pid rung cannot accidentally exempt the caller.
+LIVE_PID = 1
+
+
+def _leased(tmp_path, monkeypatch, task_id, status, block_kind="needs_input"):
+    """A board carrying `task_id`, plus a live claim file for it. Returns nothing — the module is
+    read through its own public helpers, never through the file it wrote.
+
+    Re-callable: a second call for the same card MOVES it (that is the case under test — the same
+    claim on a card that stopped being blocked), rather than trying to build the board twice."""
+    db = tmp_path / "kanban.db"
+    if db.exists():
+        con = sqlite3.connect(db)
+        con.execute("UPDATE tasks SET status = ?, block_kind = ? WHERE id = ?",
+                    (status, block_kind, task_id))
+        con.commit()
+        con.close()
+    else:
+        _board(tmp_path, [(task_id, "x", status, block_kind, 0, "bob", 1.0)])
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    monkeypatch.delenv("HERMES_OVERWATCH_TASK", raising=False)
+    monkeypatch.setattr(mod, "CLAIM_DIR", tmp_path / "claims")
+    (tmp_path / "claims").mkdir(exist_ok=True)
+    (tmp_path / "claims" / f"{task_id}.claim").write_text(
+        json.dumps({"pid": LIVE_PID, "created_at": time.time(), "reason": "spawn"}))
+
+
+def test_awareness_gate_refuses_a_write_to_a_blocked_leased_card(monkeypatch, tmp_path):
+    """AC1's enforcement half. This is the measured defect, replayed: a second session — the
+    notification poller's turn — writing to a card whose escalation is in flight. Refused on the
+    tool surface AND on the hook's own return shape."""
+    _leased(tmp_path, monkeypatch, "t_dupcrd", "blocked")
+    hit = mod.writes_to_leased_card("kanban_comment", {"task_id": "t_dupcrd"})
+    assert hit is not None and hit[0] == "t_dupcrd", "a comment on a card under assessment is a write"
+    assert hit[1] == "kanban_comment" and hit[2] == LIVE_PID
+    verdict = mod.on_pre_tool_call(tool_name="kanban_comment", args={"task_id": "t_dupcrd"})
+    assert verdict["action"] == "block"
+    assert "REFUSED" in verdict["message"] and "t_dupcrd" in verdict["message"]
+
+
+def test_awareness_gate_stands_down_once_the_card_is_no_longer_blocked(monkeypatch, tmp_path):
+    """The gate's own worst failure, measured on the live board while this change was being
+    verified: `t_46783f69` was escalated from the ROOT GATEWAY (still running pre-`07c72dfa` code,
+    so its claim names the gateway's long-lived pid), the assessor extended the cap and unblocked
+    the card, and the dispatcher started a worker on it — whose own comment and completion would
+    have been refused for the rest of the TTL by a gate aimed at a duplicate decider that no
+    longer existed. The assessment ends when the card stops being blocked; so does the gate."""
+    _leased(tmp_path, monkeypatch, "t_movedx", "running")
+    assert mod.writes_to_leased_card("kanban_comment", {"task_id": "t_movedx"}) is None
+    assert mod.on_pre_tool_call(tool_name="kanban_complete", args={"task_id": "t_movedx"}) is None
+    # ...and the same claim on the same card refuses again the moment it blocks (TWO writes are
+    # one card's state, not the gate's opinion of the session).
+    _leased(tmp_path, monkeypatch, "t_movedx", "blocked")
+    assert mod.writes_to_leased_card("kanban_complete", {"task_id": "t_movedx"}) is not None
+
+
+def test_awareness_gate_leaves_every_read_alone(monkeypatch, tmp_path):
+    """The read surface, deliberately untouched — a gate that refuses reads is how the fleet stops
+    being able to diagnose the card it is protecting."""
+    _leased(tmp_path, monkeypatch, "t_dupcrd", "blocked")
+    assert mod.writes_to_leased_card("kanban_show", {"task_id": "t_dupcrd"}) is None
+    assert mod.writes_to_leased_card("kanban_heartbeat", {"task_id": "t_dupcrd"}) is None
+    assert mod.writes_to_leased_card(
+        "terminal", {"command": "cd ~/.hermes && hermes kanban show t_dupcrd"}) is None
+    assert mod.writes_to_leased_card(
+        "terminal", {"command": "hermes kanban log t_dupcrd | tail -20"}) is None
+    assert mod.writes_to_leased_card(
+        "terminal", {"command": "sqlite3 kanban.db \"SELECT body FROM tasks WHERE id='t_dupcrd'\""}) is None
+
+
+def test_awareness_gate_exempts_the_assessor_it_spawned(monkeypatch, tmp_path):
+    """The one session that MUST be able to write is the assessment itself. `_spawn` exports
+    `HERMES_OVERWATCH_TASK` and the assessor's `hermes kanban` calls are CHILD processes that
+    inherit it — so the env rung, not just the pid rung, is what keeps the gate off its own
+    work."""
+    _leased(tmp_path, monkeypatch, "t_dupcrd", "blocked")
+    monkeypatch.setenv("HERMES_OVERWATCH_TASK", "t_dupcrd")
+    assert mod.is_assessor("t_dupcrd") is True
+    assert mod.writes_to_leased_card("kanban_comment", {"task_id": "t_dupcrd"}) is None
+    assert mod.on_pre_tool_call(tool_name="kanban_unblock", args={"task_id": "t_dupcrd"}) is None
+
+
+def test_awareness_gate_is_silent_on_an_unleased_card(monkeypatch, tmp_path):
+    """No lease, no gate. The overwhelming majority of writes in the fleet are to cards nobody is
+    assessing, and every one of them must be untouched."""
+    db = _board(tmp_path, [("t_free01", "x", "blocked", "needs_input", 0, "bob", 1.0)])
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    monkeypatch.setattr(mod, "CLAIM_DIR", tmp_path / "claims")
+    (tmp_path / "claims").mkdir(exist_ok=True)
+    monkeypatch.delenv("HERMES_OVERWATCH_TASK", raising=False)
+    assert mod.writes_to_leased_card("kanban_comment", {"task_id": "t_free01"}) is None
+    # And an unreadable board FAILS OPEN, like every other path in this module: the lease alone is
+    # never enough to refuse a write, so a board that cannot be read cannot block the fleet.
+    _leased(tmp_path, monkeypatch, "t_free01", "blocked")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "nope.db"))
+    assert mod.writes_to_leased_card("kanban_comment", {"task_id": "t_free01"}) is None
+
+
+def test_awareness_gate_reads_terminal_writes_as_shapes_not_keywords(monkeypatch, tmp_path):
+    """The terminal surface, drawn by the population sweep over 5,158 recorded calls in the fleet's
+    own corpus (fleet-control-change rules 1-2): every spelling that is a WRITE must classify as
+    one, and the two shapes the first attempt got wrong — a `git commit -m` naming this plugin, and
+    a `kanban.db` SELECT — must not."""
+    _leased(tmp_path, monkeypatch, "t_dupcrd", "blocked")
+
+    def refused(command):
+        return mod.writes_to_leased_card("terminal", {"command": command}) is not None
+
+    assert refused("cd ~/.hermes && hermes kanban unblock t_dupcrd 2>&1 | tail -1")
+    assert refused('HB=~/.hermes/hermes-agent/venv/bin/hermes; "$HB" kanban reassign t_dupcrd bob')
+    assert refused("cd ~/.hermes && python3 -m hermes_cli kanban set-cap t_dupcrd 1.50 --reason x")
+    assert refused('cd ~/.hermes && sqlite3 kanban.db "UPDATE tasks SET body=\'x\' WHERE id=\'t_dupcrd\'"')
+    assert refused('cd ~/.hermes && python3 -c "from hermes_cli import kanban_db as kb; kb.unblock_task(c, \'t_dupcrd\')"')
+    # The ONE genuine write the first tightening lost, found by auditing all 67 delta clauses rather
+    # than trusting the two quoted examples: SQLite's conflict clause sits BETWEEN verb and target.
+    assert refused('cd ~/.hermes && sqlite3 ~/.hermes/kanban.db "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (\'t_dupcrd\',\'t_other01\');"')
+    # Controls: a documented command is not a run command, and a commit message is not a write.
+    assert not refused('cd ~/.hermes && echo "next time run: hermes kanban unblock t_dupcrd"')
+    assert not refused('cd ~/.hermes/hermes-agent && git commit -m "fix(escalator): kanban-block-escalator"')
+    assert not refused('cd ~/.hermes && sqlite3 kanban.db "SELECT id FROM tasks WHERE status=\'blocked\'"')
+
+
+def test_awareness_line_fires_for_a_notification_shaped_turn(monkeypatch, tmp_path):
+    """AC1's other half — the second path still SURFACES. The line is awareness, and it says so.
+    The window is the head of the message (1000 chars), so a card id quoted deep inside a long
+    prompt does not drag the note in."""
+    _leased(tmp_path, monkeypatch, "t_dupcrd", "blocked")
+    note = mod.awareness_note("⏸ [default] @rodge Kanban t_dupcrd blocked: Round 3 needs input")
+    assert note and note.startswith(mod.AWARENESS_MARK)
+    assert "IN FLIGHT" in note and "not an instruction" in note
+    assert mod.on_pre_llm_call(user_message="⏸ [default] @rodge Kanban t_dupcrd blocked: x") == {"context": note}
+    assert mod.awareness_note("✔ [default] @bob Kanban t_dupcrd done — merged") is None
+    assert mod.awareness_note("no kanban notification here") is None
+    assert mod.awareness_note("x" * 1001 + " Kanban t_dupcrd blocked") is None
