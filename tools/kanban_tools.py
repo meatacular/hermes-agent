@@ -1308,10 +1308,11 @@ def _complete_ci_gate_rejection(task_id: str) -> Optional[str]:
             return None
         workspace = task.workspace_path or ""
         tenant = getattr(task, "tenant", None)
+        title = getattr(task, "title", None)
     finally:
         conn.close()
     try:
-        result = evaluate(workspace, tenant)
+        result = evaluate(workspace, tenant, title=title)
     except Exception as exc:  # noqa: BLE001
         # The gate itself failing is uncertainty, and uncertainty blocks — but it
         # says so plainly rather than pretending to be a CI verdict.

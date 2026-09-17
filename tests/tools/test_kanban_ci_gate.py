@@ -64,3 +64,24 @@ def test_ac2_out_of_scope_tenant_unchanged(tmp_path):
 
     assert result.blocked is False
     assert result.detail == "tenant not in scope for the CI gate"
+
+
+def test_release_scope_exempts_non_release_cards(tmp_path, monkeypatch):
+    """D-CI (2026-09-17): with ci_gate.scope == 'release', a build/verify/dir card passes straight through;
+    a [Release]/merge/deploy card is still gated (and blocks here because there is no PR)."""
+    monkeypatch.setattr(gate, "_tenant_ci", lambda tenant: {"check_name": "test-gate", "repo": "x/y", "scope": "release"})
+    ws = tmp_path / "ws"; ws.mkdir()
+    for title in ("[WP-A2] Per-context intake policy", "[Verify] Gmail polling on the deployed backend", "[Platform] the gate is wrong", "fix the thing"):
+        r = gate.evaluate(str(ws), "backupbrain", title=title)
+        assert r.blocked is False and "not a release-lane" in r.detail, title
+    for title in ("[Release] Merge PR #80", "Release: land the hermetic regress gate", "[BackupBrain] [Release] Land PR #81", "Deploy: the thing", "Merge PR #82 (approved)"):
+        r = gate.evaluate(str(ws), "backupbrain", title=title)
+        assert r.blocked is True, title          # still gated: the scratch ws has no PR
+
+
+def test_release_scope_control_all_scope_and_no_title_keep_every_card_gated(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "_tenant_ci", lambda tenant: {"check_name": "test-gate", "repo": "x/y"})
+    ws = tmp_path / "ws"; ws.mkdir()
+    assert gate.evaluate(str(ws), "backupbrain", title="[Verify] anything").blocked is True
+    monkeypatch.setattr(gate, "_tenant_ci", lambda tenant: {"check_name": "test-gate", "repo": "x/y", "scope": "release"})
+    assert gate.evaluate(str(ws), "backupbrain").blocked is True          # no title -> today's behaviour

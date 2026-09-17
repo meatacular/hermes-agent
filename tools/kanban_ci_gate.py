@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -159,7 +160,24 @@ def _gh(args: list[str], cwd: str, timeout: int = 45) -> tuple[int, str, str]:
         return 1, "", f"gh failed: {exc}"
 
 
-def evaluate(workspace_path: str, tenant: Optional[str], branch: Optional[str] = None) -> GateResult:
+# D-CI (Richie, 2026-09-17: "d-ci:a"): a tenant may SCOPE the gate to release-lane cards. Applied to
+# every card, the gate was unsatisfiable for dir cards, verify cards, fix cards riding an existing PR
+# and release cards themselves — six shapes, seven operator exemptions in one day (t_7ed4cded).
+# A release card is the one that lands a PR, so it is the one a green check can be demanded of.
+RELEASE_TITLE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)*(?:\[release\]|release\b|deploy\b|ship\b|roll\s*out\b|land\b|merge\b)", re.I)
+
+
+def in_scope(cfg: dict, title: Optional[str]) -> bool:
+    """False when the tenant scopes the gate to release cards and this title is not one.
+    An unknown scope value or a missing title keeps today's behaviour (every card gated)."""
+    scope = str((cfg or {}).get("scope") or "all").strip().lower()
+    if scope != "release" or title is None:
+        return True
+    return bool(RELEASE_TITLE.search(title or ""))
+
+
+def evaluate(workspace_path: str, tenant: Optional[str], branch: Optional[str] = None,
+             title: Optional[str] = None) -> GateResult:
     """Decide whether this card may report done.
 
     Every `return GateResult(True, ...)` below is a distinct, nameable reason.
@@ -169,6 +187,8 @@ def evaluate(workspace_path: str, tenant: Optional[str], branch: Optional[str] =
     cfg = _tenant_ci(tenant)
     if cfg is None:
         return GateResult(False, detail="tenant not in scope for the CI gate")
+    if not in_scope(cfg, title):
+        return GateResult(False, detail="card is not a release-lane card; the tenant scopes the CI gate to release cards")
 
     check_name = cfg["check_name"]
     repo = cfg["repo"]
