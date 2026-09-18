@@ -287,3 +287,148 @@ def test_the_stream_delivers_what_a_worker_writes_after_the_subscription(monkeyp
         assert msg["type"] == "feed" and msg["pane"] == "k:t_abcd1234"
         assert any(e["t"] == "thought" for e in _events(msg["ops"]))
         assert msg["offset"] == log.stat().st_size
+
+
+# ── the board: timeline, dependencies, the queue ───────────────────────────────────────────────
+
+_BOARD_SCHEMA = """
+CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, body TEXT, assignee TEXT, status TEXT,
+  priority INTEGER DEFAULT 0, tenant TEXT, project_id TEXT, branch_name TEXT, max_cost REAL,
+  created_at INTEGER, started_at INTEGER, completed_at INTEGER, consecutive_failures INTEGER DEFAULT 0,
+  block_kind TEXT, last_failure_error TEXT);
+CREATE TABLE task_links (parent_id TEXT, child_id TEXT, PRIMARY KEY (parent_id, child_id));
+CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, run_id INTEGER,
+  kind TEXT, payload TEXT, created_at INTEGER);
+CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, profile TEXT, status TEXT,
+  outcome TEXT, started_at INTEGER, ended_at INTEGER, summary TEXT, worker_pid INTEGER,
+  claim_expires INTEGER, last_heartbeat_at INTEGER);
+CREATE TABLE task_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, author TEXT,
+  body TEXT, created_at INTEGER);
+"""
+
+
+@pytest.fixture
+def board(client):
+    """A small board on the temporary home, so these tests never read the live fleet's."""
+    import sqlite3
+
+    api, home = client
+    conn = sqlite3.connect(home / "kanban.db")
+    conn.executescript(_BOARD_SCHEMA)
+
+    def task(tid, title, status, created, assignee="bob"):
+        conn.execute("INSERT INTO tasks (id,title,body,assignee,status,created_at,tenant) "
+                     "VALUES (?,?,?,?,?,?,'weroll')", (tid, title, "the brief for " + tid, assignee, status, created))
+
+    task("t_aaaa1111", "Parent still open", "running", 1000)
+    task("t_bbbb2222", "Parent already finished", "done", 900)
+    task("t_cccc3333", "Child waiting on one open parent", "todo", 3000)
+    task("t_dddd4444", "Ready and unblocked, newest", "ready", 5000)
+    task("t_eeee5555", "Triage, older", "triage", 2000)
+    task("t_ffff6666", "Ready but blocked by the open parent", "ready", 4000)
+    conn.execute("INSERT INTO task_links VALUES ('t_aaaa1111','t_cccc3333')")
+    conn.execute("INSERT INTO task_links VALUES ('t_bbbb2222','t_cccc3333')")
+    conn.execute("INSERT INTO task_links VALUES ('t_aaaa1111','t_ffff6666')")
+
+    # A card's real history, including a repeated claim that must collapse to one step.
+    for kind, payload, at in [
+        ("created", json.dumps({"status": "todo"}), 1000),
+        ("dependency_wait", json.dumps({"reason": "parent_not_done"}), 1010),
+        ("promoted", None, 1100),
+        ("claimed", json.dumps({"run_id": 1}), 1200),
+        ("heartbeat", None, 1260),                              # noise, never a step
+        ("claimed", json.dumps({"run_id": 2}), 1300),           # a retry, not progress
+        ("review_requested", json.dumps({"summary": "ready"}), 1400),
+        ("changes_requested", None, 1450),                      # sent back — a real step
+        ("claimed", json.dumps({"run_id": 3}), 1500),
+    ]:
+        conn.execute("INSERT INTO task_events (task_id,kind,payload,created_at) VALUES ('t_aaaa1111',?,?,?)",
+                     (kind, payload, at))
+    conn.execute("INSERT INTO task_comments (task_id,author,body,created_at) "
+                 "VALUES ('t_aaaa1111','rodge','needs a test',1500)")
+    conn.execute("INSERT INTO task_runs (task_id,profile,status,outcome,started_at,ended_at,summary) "
+                 "VALUES ('t_aaaa1111','bob','done','completed',1200,1400,'first attempt')")
+    conn.commit()
+    conn.close()
+    return api
+
+
+def test_timeline_collapses_a_retry_into_one_step(board):
+    tl = board.get("/api/plugins/fleet-live/cards/t_aaaa1111").json()["card"]["timeline"]
+    cols = [s["col"] for s in tl["steps"]]
+    # The second claim is a retry in the column the card is already in and must not read as
+    # progress; being sent back from review to ready is a real move and must.
+    assert cols == ["todo", "scheduled", "ready", "running", "review", "ready", "running"]
+    assert tl["count"] == 7
+
+
+def test_timeline_knows_what_is_still_to_come(board):
+    tl = board.get("/api/plugins/fleet-live/cards/t_aaaa1111").json()["card"]["timeline"]
+    assert tl["current"] == "running"
+    assert tl["remaining"] == ["review", "done"]
+    assert tl["pipeline"] == ["triage", "todo", "ready", "running", "review", "done"]
+
+
+def test_a_detour_does_not_cost_a_card_its_place(board):
+    """A blocked card has not gone backwards — its remaining road is measured from the furthest
+    point it reached, and the detour is reported beside the road rather than inside it."""
+    tl = PLUGIN._timeline("t_aaaa1111", "blocked")
+    assert tl["detour"] == "blocked"
+    assert "blocked" not in tl["pipeline"]
+    assert tl["remaining"] == ["done"]                # measured from `review`, the furthest reached
+
+
+def test_a_card_sent_back_must_pass_the_stations_again(board):
+    """The opposite of a detour: `changes_requested` really is a step backwards, so review is
+    owed again. Measuring from the furthest point ever reached would promise a skipped step."""
+    tl = PLUGIN._timeline("t_aaaa1111", "ready")
+    assert tl["remaining"] == ["running", "review", "done"]
+
+
+def test_dependencies_count_only_the_unfinished_parents(board):
+    card = board.get("/api/plugins/fleet-live/cards/t_cccc3333").json()["card"]
+    assert {p["id"] for p in card["deps"]["parents"]} == {"t_aaaa1111", "t_bbbb2222"}
+    assert card["deps"]["unmet"] == 1                 # the `done` parent does not hold it up
+    assert card["deps"]["children"] == []
+
+
+def test_a_card_knows_what_is_waiting_on_it(board):
+    card = board.get("/api/plugins/fleet-live/cards/t_aaaa1111").json()["card"]
+    assert {c["id"] for c in card["deps"]["children"]} == {"t_cccc3333", "t_ffff6666"}
+
+
+def test_a_card_carries_its_brief_comments_and_attempts(board):
+    card = board.get("/api/plugins/fleet-live/cards/t_aaaa1111").json()["card"]
+    assert card["body"].endswith("t_aaaa1111")
+    assert [c["author"] for c in card["comments"]] == ["rodge"]
+    assert [r["outcome"] for r in card["runs"]] == ["completed"]
+
+
+def test_an_unknown_card_is_404_and_a_malformed_id_is_400(board):
+    assert board.get("/api/plugins/fleet-live/cards/t_99999999").status_code == 404
+    assert board.get("/api/plugins/fleet-live/cards/not-a-task").status_code == 400
+
+
+def test_the_queue_puts_unblocked_work_first_then_newest(board):
+    """Ordering is the whole product here: nothing-blocking first, then how close the column is
+    to a worker, then most recent."""
+    q = board.get("/api/plugins/fleet-live/queue").json()["queue"]
+    ids = [c["id"] for c in q]
+    # t_dddd4444 (ready, unblocked, newest) beats t_eeee5555 (triage, unblocked);
+    # both beat t_ffff6666 and t_cccc3333, which are waiting on an unfinished parent.
+    assert ids.index("t_dddd4444") < ids.index("t_eeee5555")
+    assert ids.index("t_eeee5555") < ids.index("t_ffff6666")
+    assert ids.index("t_eeee5555") < ids.index("t_cccc3333")
+
+
+def test_the_queue_names_what_is_blocking_each_card(board):
+    q = {c["id"]: c for c in board.get("/api/plugins/fleet-live/queue").json()["queue"]}
+    assert [p["id"] for p in q["t_ffff6666"]["blocked_by"]] == ["t_aaaa1111"]
+    assert q["t_dddd4444"]["blocked_by"] == []
+    assert q["t_cccc3333"]["deps"]["children_count"] == 0
+
+
+def test_the_queue_excludes_work_already_running_or_finished(board):
+    q = [c["id"] for c in board.get("/api/plugins/fleet-live/queue").json()["queue"]]
+    assert "t_aaaa1111" not in q          # running
+    assert "t_bbbb2222" not in q          # done

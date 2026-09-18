@@ -1,9 +1,22 @@
 /* Hermes fleet — Live page.
-   Every colour comes from the host's theme tokens, so the page follows whatever theme the
-   dashboard is wearing. The two literal accents are semantic and deliberate: amber = a worker
-   whose heartbeat has gone quiet, red = a worker whose process is gone. */
+
+   Colour comes from the host's theme tokens wherever a token means the right thing, so the page
+   follows whatever theme the dashboard is wearing. The literal hues below are semantic, not
+   decorative: a board column has a meaning that must not change with the theme (red is blocked,
+   green is ready, amber is waiting on a human), and the four stat tiles are tinted so the eye can
+   find "cost" in a grid of twenty panes without reading a single label. Each is declared once as
+   a variable here and used by name. */
 
 .fl-root {
+  --fl-cost: #d97706;      /* amber  — money */
+  --fl-tokens: #2563eb;    /* blue   — volume */
+  --fl-steps: #7c3aed;     /* violet — work done */
+  --fl-time: #0d9488;      /* teal   — elapsed */
+  --fl-ok: var(--color-success, #16a34a);
+  --fl-warn: var(--color-warning, #d97706);
+  --fl-bad: var(--color-destructive, #dc2626);
+  --fl-card-max: 620px;
+
   width: 100%;
   padding: 4px 2px 96px;
   color: var(--color-foreground);
@@ -15,135 +28,244 @@
 /* ── page header ─────────────────────────────────────────────────────────────────────────── */
 .fl-head {
   display: flex; align-items: flex-end; justify-content: space-between;
-  gap: 16px; flex-wrap: wrap; margin-bottom: 14px;
+  gap: 28px; flex-wrap: wrap;
+  padding: 10px 0 20px;
 }
-.fl-head h1 { font-size: 22px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
-.fl-sub { font-size: 12.5px; color: var(--color-muted-foreground); margin-top: 2px; max-width: 70ch; }
-.fl-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fl-head h1 { font-size: 26px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.015em; line-height: 1.1; }
+.fl-sub { font-size: 13px; color: var(--color-muted-foreground); }
+.fl-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-bottom: 2px; }
 
-.fl-select, .fl-btn, .fl-segbtn {
+.fl-select, .fl-btn {
   background: var(--color-card);
   color: var(--color-foreground);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm, 6px);
-  padding: 4px 9px; font-size: 12.5px; line-height: 1.5;
+  padding: 6px 12px; font-size: 12.5px; line-height: 1.5;
 }
-.fl-btn:hover, .fl-segbtn:hover, .fl-select:hover { border-color: var(--color-primary); }
+.fl-btn:hover, .fl-select:hover { border-color: var(--color-primary); }
 .fl-btn.is-active { background: var(--color-primary); color: var(--color-primary-foreground); border-color: var(--color-primary); }
-.fl-seg { display: inline-flex; }
-.fl-seg .fl-segbtn { border-radius: 0; margin-left: -1px; min-width: 28px; text-align: center; }
-.fl-seg .fl-segbtn:first-child { border-radius: var(--radius-sm, 6px) 0 0 var(--radius-sm, 6px); margin-left: 0; }
-.fl-seg .fl-segbtn:last-child { border-radius: 0 var(--radius-sm, 6px) var(--radius-sm, 6px) 0; }
-.fl-seg .fl-segbtn.is-active { background: var(--color-primary); color: var(--color-primary-foreground); border-color: var(--color-primary); position: relative; z-index: 1; }
 
-.fl-conn { font-size: 11.5px; color: var(--color-muted-foreground); display: inline-flex; align-items: center; gap: 5px; }
+.fl-conn { font-size: 11.5px; color: var(--color-muted-foreground); display: inline-flex; align-items: center; gap: 6px; }
 .fl-conn::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--color-muted-foreground); }
-.fl-conn.is-on::before { background: var(--color-success, #16a34a); }
-.fl-conn.is-off::before { background: var(--color-warning, #d97706); animation: fl-pulse 1.2s ease-in-out infinite; }
+.fl-conn.is-on::before { background: var(--fl-ok); }
+.fl-conn.is-off::before { background: var(--fl-warn); animation: fl-pulse 1.2s ease-in-out infinite; }
+
+/* ── view tabs ───────────────────────────────────────────────────────────────────────────── */
+.fl-viewtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--color-border); margin-bottom: 4px; }
+.fl-viewtab {
+  background: transparent; border: 0; border-bottom: 2px solid transparent;
+  color: var(--color-muted-foreground); font-size: 14px; font-weight: 550;
+  padding: 8px 14px 10px; display: inline-flex; align-items: center; gap: 7px;
+}
+.fl-viewtab:hover { color: var(--color-foreground); }
+.fl-viewtab.is-active { color: var(--color-foreground); border-bottom-color: var(--color-primary); }
+.fl-count {
+  font-size: 11px; font-weight: 600; min-width: 18px; text-align: center;
+  padding: 1px 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--color-primary) 22%, transparent);
+  color: var(--color-foreground);
+}
+.fl-viewnote { font-size: 12.5px; color: var(--color-muted-foreground); padding: 10px 2px 16px; max-width: 90ch; }
 
 .fl-blank {
   border: 1px dashed var(--color-border); border-radius: var(--radius-lg, 12px);
   padding: 48px 24px; text-align: center; color: var(--color-muted-foreground);
 }
 
-/* ── the grid: up to three columns, as many rows as there are agents ─────────────────────── */
+/* ── the grid: as many columns as the viewport affords, each card capped ─────────────────── */
 .fl-grid {
   display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(var(--fl-cols, 3), minmax(0, 1fr));
+  gap: 16px;
+  /* auto-FIT, not auto-fill: empty tracks collapse, so one lonely pane grows to its cap
+     instead of sitting at the minimum width beside two reserved ghosts. */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
   align-items: start;
+  justify-content: start;
 }
-@media (max-width: 1500px) { .fl-grid { grid-template-columns: repeat(min(var(--fl-cols, 3), 2), minmax(0, 1fr)); } }
-@media (max-width: 1000px) { .fl-grid { grid-template-columns: minmax(0, 1fr); } }
-
 .fl-pane {
   display: flex; flex-direction: column; min-width: 0;
+  width: 100%; max-width: var(--fl-card-max);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg, 12px);
   background: var(--color-card);
   overflow: hidden;
 }
-/* Expanded: one pane takes the full width of the grid and gets room to read in. */
-.fl-pane.is-wide { grid-column: 1 / -1; }
+/* A card should not sprawl on a wide desktop — beyond the cap the grid adds a column instead.
+   Below tablet width the cap is irrelevant and the card simply fills the screen. */
+@media (max-width: 720px) { .fl-root { --fl-card-max: none; } }
+.fl-pane.is-wide { grid-column: 1 / -1; max-width: none; }
 .fl-pane.is-wide .fl-feed { max-height: 60vh; }
 
 /* ── pane header ─────────────────────────────────────────────────────────────────────────── */
 .fl-pane-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 9px 10px 7px; border-bottom: 1px solid var(--color-border);
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 11px 12px 9px; border-bottom: 1px solid var(--color-border);
 }
-.fl-pane-title {
-  flex: 1; min-width: 0; font-weight: 600; font-size: 13px; line-height: 1.35;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-}
-.fl-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.fl-dot.is-live { background: var(--color-success, #16a34a); animation: fl-pulse 2s ease-in-out infinite; }
-.fl-dot.is-stale { background: var(--color-warning, #d97706); }
-.fl-dot.is-dead { background: var(--color-destructive, #dc2626); }
+/* The title is never truncated: which card an agent is on is the one thing the pane exists to
+   say, and half a title is a guessing game. */
+.fl-pane-title { flex: 1; min-width: 0; font-weight: 600; font-size: 13.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.fl-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; margin-top: 5px; }
+.fl-dot.is-live { background: var(--fl-ok); animation: fl-pulse 2s ease-in-out infinite; }
+.fl-dot.is-stale { background: var(--fl-warn); }
+.fl-dot.is-dead { background: var(--fl-bad); }
 @keyframes fl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 .fl-icon-btn {
   background: transparent; border: 0; color: var(--color-muted-foreground);
-  padding: 2px 4px; border-radius: var(--radius-sm, 6px); flex: none;
+  padding: 2px 6px; border-radius: var(--radius-sm, 6px); flex: none; font-size: 15px; line-height: 1.2;
 }
 .fl-icon-btn:hover { color: var(--color-foreground); background: color-mix(in srgb, var(--color-foreground) 8%, transparent); }
 
-.fl-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 7px 10px 0; }
+.fl-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 9px 12px 0; align-items: center; }
 .fl-chip {
-  font-size: 11px; line-height: 1.6; padding: 0 6px; border-radius: 999px;
+  font-size: 11px; line-height: 1.7; padding: 0 7px; border-radius: 999px;
   border: 1px solid var(--color-border); color: var(--color-muted-foreground);
-  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: transparent; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .fl-chip--agent { color: var(--color-primary); border-color: color-mix(in srgb, var(--color-primary) 45%, transparent); font-weight: 600; }
-.fl-chip--link { text-decoration: none; }
+.fl-chip--link { cursor: pointer; font-family: var(--font-mono, ui-monospace, monospace); }
 .fl-chip--link:hover { border-color: var(--color-primary); color: var(--color-foreground); }
-.fl-chip--warn { color: var(--color-warning, #d97706); border-color: color-mix(in srgb, var(--color-warning, #d97706) 45%, transparent); }
+.fl-chip--warn { color: var(--fl-warn); border-color: color-mix(in srgb, var(--fl-warn) 45%, transparent); }
 
-/* ── the numbers ─────────────────────────────────────────────────────────────────────────── */
-.fl-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; padding: 8px 10px 2px; }
-.fl-stat { min-width: 0; }
-.fl-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-muted-foreground); }
-.fl-stat-value { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.3; }
+/* ── status badges ───────────────────────────────────────────────────────────────────────── */
+.fl-badge {
+  font-size: 10.5px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 1px 8px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap;
+}
+.fl-badge--triage    { color: #a855f7; background: color-mix(in srgb, #a855f7 16%, transparent); }
+.fl-badge--todo      { color: var(--color-muted-foreground); background: color-mix(in srgb, var(--color-foreground) 10%, transparent); }
+.fl-badge--scheduled { color: var(--fl-tokens); background: color-mix(in srgb, var(--fl-tokens) 18%, transparent); }
+.fl-badge--ready     { color: var(--fl-ok); background: color-mix(in srgb, var(--fl-ok) 18%, transparent); }
+.fl-badge--running   { color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 22%, transparent); }
+.fl-badge--blocked   { color: var(--fl-bad); background: color-mix(in srgb, var(--fl-bad) 18%, transparent); }
+.fl-badge--review    { color: var(--fl-warn); background: color-mix(in srgb, var(--fl-warn) 18%, transparent); }
+.fl-badge--done, .fl-badge--completed { color: var(--fl-ok); background: color-mix(in srgb, var(--fl-ok) 12%, transparent); }
+.fl-badge--archived, .fl-badge--reclaimed, .fl-badge--released {
+  color: var(--color-muted-foreground); background: color-mix(in srgb, var(--color-foreground) 8%, transparent); }
+.fl-badge--crashed, .fl-badge--timed_out, .fl-badge--failed, .fl-badge--gave_up {
+  color: var(--fl-bad); background: color-mix(in srgb, var(--fl-bad) 18%, transparent); }
+.fl-badge--review_requested { color: var(--fl-warn); background: color-mix(in srgb, var(--fl-warn) 16%, transparent); }
+
+/* ── the number tiles ────────────────────────────────────────────────────────────────────── */
+.fl-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 12px; }
+@media (min-width: 560px) { .fl-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.fl-stat {
+  min-width: 0; padding: 8px 10px 7px;
+  border-radius: var(--radius-md, 9px);
+  border: 1px solid color-mix(in srgb, var(--fl-tone) 28%, transparent);
+  background: color-mix(in srgb, var(--fl-tone) 9%, transparent);
+}
+.fl-stat--cost   { --fl-tone: var(--fl-cost); }
+.fl-stat--tokens { --fl-tone: var(--fl-tokens); }
+.fl-stat--steps  { --fl-tone: var(--fl-steps); }
+.fl-stat--time   { --fl-tone: var(--fl-time); }
+.fl-stat-label {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 650;
+  color: color-mix(in srgb, var(--fl-tone) 72%, var(--color-foreground));
+}
+.fl-stat-value { font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.25; margin-top: 1px; }
 .fl-stat-sub { font-size: 10.5px; color: var(--color-muted-foreground); height: 14px; line-height: 14px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* On a desktop pane there is room to read these properly. */
+@media (min-width: 1100px) {
+  .fl-stat { padding: 10px 12px 9px; }
+  .fl-stat-value { font-size: 20px; }
+  .fl-stat-label { font-size: 10px; }
+}
 /* The track has to be visible on its own, or a worker at 2% of its cap looks like a rendering
    bug rather than a worker with room to spare. */
-.fl-bar { background: color-mix(in srgb, var(--color-foreground) 18%, transparent); border-radius: 999px;
-  height: 4px; margin: 4px 0 2px; width: 100%; max-width: 160px; }
-.fl-bar i { display: block; height: 100%; min-width: 3px; border-radius: 999px; background: var(--color-primary); }
-.fl-bar i.is-hot { background: var(--color-destructive, #dc2626); }
+.fl-bar { background: color-mix(in srgb, var(--color-foreground) 20%, transparent); border-radius: 999px;
+  height: 4px; margin: 5px 0 3px; width: 100%; }
+.fl-bar i { display: block; height: 100%; min-width: 3px; border-radius: 999px; background: var(--fl-tone, var(--color-primary)); }
+.fl-bar i.is-hot { background: var(--fl-bad); }
 
-/* ── tabs ────────────────────────────────────────────────────────────────────────────────── */
-.fl-tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--color-border); }
+/* ── the lane timeline ───────────────────────────────────────────────────────────────────── */
+.fl-timeline { padding: 2px 12px 10px; }
+.fl-steps { display: flex; flex-wrap: wrap; align-items: center; gap: 0; }
+.fl-step {
+  font-size: 10.5px; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid var(--color-border); color: var(--color-muted-foreground);
+  margin: 2px 0;
+}
+.fl-step + .fl-step::before {
+  content: ""; display: inline-block; width: 10px; height: 1px; margin: 0 5px 3px -19px;
+  background: var(--color-border); vertical-align: middle;
+}
+.fl-step + .fl-step { margin-left: 20px; }
+.fl-step--done {
+  color: var(--fl-ok); border-color: color-mix(in srgb, var(--fl-ok) 40%, transparent);
+  background: color-mix(in srgb, var(--fl-ok) 10%, transparent);
+}
+.fl-step--now {
+  color: var(--color-primary-foreground); background: var(--color-primary);
+  border-color: var(--color-primary); font-weight: 650;
+}
+.fl-step--todo { opacity: 0.55; border-style: dashed; }
+.fl-steps-caption {
+  font-size: 10.5px; color: var(--color-muted-foreground); margin-top: 6px;
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+}
+
+/* ── dependencies ────────────────────────────────────────────────────────────────────────── */
+.fl-deps { padding: 0 12px 10px; display: flex; flex-direction: column; gap: 5px; }
+.fl-deprow { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; }
+.fl-deplabel {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 650;
+  color: var(--color-muted-foreground); padding-top: 3px; white-space: nowrap;
+}
+.fl-deplabel.is-blocking { color: var(--fl-bad); }
+.fl-deplabel.is-clear { color: var(--fl-ok); }
+.fl-dep {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+  font-size: 11px; line-height: 1.6; padding: 1px 9px 1px 7px; border-radius: 999px;
+  border: 1px solid var(--color-border); background: transparent; color: var(--color-muted-foreground);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;
+}
+button.fl-dep:hover { border-color: var(--color-primary); color: var(--color-foreground); }
+.fl-dep-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--fl-ok); flex: none; }
+.fl-dep.is-open { color: var(--color-foreground); border-color: color-mix(in srgb, var(--fl-bad) 45%, transparent); }
+.fl-dep.is-open .fl-dep-dot { background: var(--fl-bad); }
+.fl-dep--count { cursor: default; }
+
+/* ── actions ─────────────────────────────────────────────────────────────────────────────── */
+.fl-actions { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 12px 12px; }
+.fl-act {
+  background: transparent; color: var(--color-muted-foreground);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm, 6px);
+  padding: 3px 11px; font-size: 11.5px; line-height: 1.6;
+}
+.fl-act:hover:not(:disabled) { color: var(--color-foreground); border-color: var(--color-primary); }
+.fl-act:disabled { opacity: 0.45; cursor: default; }
+.fl-act.is-primary { color: var(--color-primary); border-color: color-mix(in srgb, var(--color-primary) 55%, transparent); font-weight: 600; }
+.fl-act.is-busy { opacity: 0.6; }
+
+/* ── tabs + feed ─────────────────────────────────────────────────────────────────────────── */
+.fl-tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
 .fl-tab {
   background: transparent; border: 0; border-bottom: 2px solid transparent;
-  color: var(--color-muted-foreground); font-size: 11.5px; padding: 3px 7px 5px; text-transform: lowercase;
+  color: var(--color-muted-foreground); font-size: 11.5px; padding: 4px 8px 6px; text-transform: lowercase;
 }
 .fl-tab:hover { color: var(--color-foreground); }
 .fl-tab.is-active { color: var(--color-foreground); border-bottom-color: var(--color-primary); font-weight: 600; }
 
-/* ── the feed ────────────────────────────────────────────────────────────────────────────── */
 .fl-feed-wrap { position: relative; }
 .fl-feed {
   max-height: 42vh; min-height: 180px; overflow-y: auto; overscroll-behavior: contain;
-  padding: 8px 10px 14px; display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px 16px; display: flex; flex-direction: column; gap: 9px;
   scrollbar-width: thin;
 }
 .fl-feed--idle { align-items: center; justify-content: center; }
 .fl-empty { color: var(--color-muted-foreground); font-size: 12px; padding: 18px 0; text-align: center; }
 
 .fl-ev { min-width: 0; }
-.fl-ev-label {
-  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--color-muted-foreground); margin-bottom: 2px;
-}
+.fl-ev-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-muted-foreground); margin-bottom: 2px; }
 .fl-ev-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; font-size: 12.5px; }
 
-.fl-ev--thought { border-left: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent); padding-left: 8px; }
-.fl-ev--thought .fl-ev-text { color: var(--color-muted-foreground); font-style: normal; }
-.fl-ev--say { border-left: 2px solid var(--color-foreground); padding-left: 8px; }
+.fl-ev--thought { border-left: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent); padding-left: 9px; }
+.fl-ev--thought .fl-ev-text { color: var(--color-muted-foreground); }
+.fl-ev--say { border-left: 2px solid var(--color-foreground); padding-left: 9px; }
 .fl-ev--say .fl-ev-text { color: var(--color-foreground); }
-.fl-ev--user { border-left: 2px dashed var(--color-border); padding-left: 8px; }
+.fl-ev--user { border-left: 2px dashed var(--color-border); padding-left: 9px; }
 
 /* The caret marks a block still being written — the page's only "it is happening now" signal
    that survives a still screenshot. */
@@ -162,22 +284,94 @@
   font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; line-height: 1.45;
   white-space: pre-wrap; overflow-wrap: anywhere; color: var(--color-muted-foreground);
   background: color-mix(in srgb, var(--color-foreground) 5%, transparent);
-  border-radius: var(--radius-sm, 6px); padding: 6px 8px;
+  border-radius: var(--radius-sm, 6px); padding: 8px 10px;
 }
-.fl-more, .fl-loadmore {
-  background: transparent; border: 0; color: var(--color-primary);
-  font-size: 11px; padding: 3px 0;
-}
+.fl-more, .fl-loadmore { background: transparent; border: 0; color: var(--color-primary); font-size: 11px; padding: 3px 0; }
 .fl-loadmore { display: block; width: 100%; text-align: center; border-bottom: 1px solid var(--color-border); }
-
-.fl-card-body { padding: 10px; max-height: 42vh; overflow-y: auto; }
+.fl-card-body { padding: 12px; max-height: 42vh; overflow-y: auto; }
 
 /* ── the tail pill: the control that makes scroll-back safe ──────────────────────────────── */
 .fl-tailpill {
   position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
   background: var(--color-primary); color: var(--color-primary-foreground);
-  border: 0; border-radius: 999px; padding: 4px 12px; font-size: 11.5px; font-weight: 600;
+  border: 0; border-radius: 999px; padding: 4px 13px; font-size: 11.5px; font-weight: 600;
   box-shadow: 0 2px 10px color-mix(in srgb, var(--color-foreground) 25%, transparent);
   white-space: nowrap;
 }
 .fl-tailpill:hover { filter: brightness(1.08); }
+
+/* ── Up next ─────────────────────────────────────────────────────────────────────────────── */
+.fl-queue { display: flex; flex-direction: column; gap: 10px; }
+.fl-queue-note { font-size: 11.5px; color: var(--color-muted-foreground); }
+.fl-qrow {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  border: 1px solid var(--color-border); border-left: 3px solid var(--fl-ok);
+  border-radius: var(--radius-md, 9px); background: var(--color-card); padding: 12px 14px;
+}
+.fl-qrow.is-blocked { border-left-color: var(--fl-bad); }
+.fl-qmain { flex: 1; min-width: 260px; display: flex; flex-direction: column; gap: 7px; }
+.fl-qtitle {
+  background: transparent; border: 0; padding: 0; text-align: left;
+  font-size: 13.5px; font-weight: 600; color: var(--color-foreground); line-height: 1.4; overflow-wrap: anywhere;
+}
+.fl-qtitle:hover { color: var(--color-primary); }
+.fl-qmeta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.fl-qrow .fl-actions { padding: 0; }
+
+/* ── the card modal ──────────────────────────────────────────────────────────────────────── */
+.fl-modal-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  background: color-mix(in srgb, #000 62%, transparent);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 6vh 16px 4vh; overflow-y: auto;
+}
+.fl-modal {
+  width: 100%; max-width: 760px;
+  background: var(--color-card); color: var(--color-card-foreground, var(--color-foreground));
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg, 12px);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+}
+.fl-modal-head {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 14px 14px 12px; border-bottom: 1px solid var(--color-border);
+  position: sticky; top: 0; background: var(--color-card); border-radius: var(--radius-lg, 12px) var(--radius-lg, 12px) 0 0;
+}
+.fl-modal-title { flex: 1; min-width: 0; font-size: 15px; font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; }
+.fl-modal-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.fl-modal-body .fl-chips, .fl-modal-body .fl-timeline, .fl-modal-body .fl-deps, .fl-modal-body .fl-actions { padding: 0; }
+.fl-modal-h {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; font-weight: 650;
+  color: var(--color-muted-foreground); margin: 6px 0 0;
+}
+.fl-error { color: var(--fl-bad); font-size: 12.5px; }
+.fl-runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.fl-runs li { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 11.5px; }
+.fl-run-meta { color: var(--color-muted-foreground); }
+/* A card that bounced a dozen times carries a dozen paragraph-long summaries; unclamped they
+   bury the brief and the comments under them. Three lines is enough to recognise an attempt,
+   and the full text is in the title. */
+.fl-run-sum { flex-basis: 100%; color: var(--color-muted-foreground); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.fl-comment { border-left: 2px solid var(--color-border); padding-left: 10px; }
+.fl-comment-head { font-size: 10.5px; color: var(--color-muted-foreground); }
+.fl-comment-body { font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.fl-composer { display: flex; flex-direction: column; gap: 7px; }
+.fl-composer textarea {
+  width: 100%; resize: vertical; font: inherit; font-size: 12.5px; line-height: 1.5;
+  color: var(--color-foreground); background: color-mix(in srgb, var(--color-foreground) 4%, transparent);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm, 6px); padding: 8px 10px;
+}
+.fl-composer textarea:focus { outline: 2px solid var(--color-ring, var(--color-primary)); outline-offset: -1px; }
+.fl-composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.fl-hint { font-size: 10.5px; color: var(--color-muted-foreground); }
+
+/* ── toast ───────────────────────────────────────────────────────────────────────────────── */
+.fl-toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 70;
+  max-width: min(560px, 90vw);
+  background: var(--color-foreground); color: var(--color-card);
+  border-radius: 999px; padding: 9px 18px; font-size: 12.5px; font-weight: 550;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+.fl-toast.is-bad { background: var(--fl-bad); color: #fff; border-radius: var(--radius-md, 9px); }

@@ -233,6 +233,102 @@ def _attempt_count(task_id: str) -> int:
     return int(rows[0]["n"]) if rows else 0
 
 
+# ── the lane timeline ──────────────────────────────────────────────────────────────────────────
+# The board has eight columns, but only six of them are a card's road: `blocked` and `scheduled`
+# are detours a card is pushed into and comes back from, not stations it passes through. So the
+# pipeline below is what a pane draws as "where this card has been and what is still to come",
+# and a detour is reported separately rather than inserted into the road.
+PIPELINE = ["triage", "todo", "ready", "running", "review", "done"]
+DETOURS = ["blocked", "scheduled"]
+BOARD_COLUMNS = ["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"]
+
+# task_events is append-only and is the only record of how a card actually moved. These are the
+# event kinds that mean "the card changed column"; everything else (heartbeat, commented,
+# attached, …) is noise for this purpose.
+_EVENT_COLUMN = {
+    "promoted": "ready",
+    "unblocked": "ready",
+    "claimed": "running",
+    "review_requested": "review",
+    "changes_requested": "ready",
+    "review_reopened": "ready",
+    "completed": "done",
+    "blocked": "blocked",
+    "dependency_wait": "scheduled",
+    "scheduled": "scheduled",
+    "archived": "archived",
+    "gave_up": "blocked",
+}
+
+
+def _timeline(task_id: str, status: Optional[str] = None) -> dict:
+    """Where this card has been, in order, and what is still ahead of it.
+
+    ``steps`` is the de-duplicated column history — consecutive events landing in the same column
+    (four claims in a row, say) are one step, because a re-claim is a retry, not progress.
+    """
+    rows = _rows(_kanban_db(), (
+        "SELECT kind, payload, created_at FROM task_events WHERE task_id = ? "
+        "AND kind IN ('created','promoted','unblocked','claimed','review_requested','changes_requested',"
+        "'review_reopened','completed','blocked','dependency_wait','scheduled','archived','gave_up','status') "
+        "ORDER BY id ASC"), (task_id,))
+    steps: List[dict] = []
+    for row in rows:
+        kind = row["kind"]
+        if kind in ("created", "status"):
+            try:
+                col = (json.loads(row["payload"] or "{}") or {}).get("status")
+            except ValueError:
+                col = None
+            if kind == "created" and not col:
+                col = "triage"
+        else:
+            col = _EVENT_COLUMN.get(kind)
+        if not col or (steps and steps[-1]["col"] == col):
+            continue
+        steps.append({"col": col, "at": row["created_at"], "kind": kind})
+    if status and (not steps or steps[-1]["col"] != status):
+        steps.append({"col": status, "at": None, "kind": "current"})
+
+    current = status or (steps[-1]["col"] if steps else None)
+    # What is left of the road is measured from where the card IS, not from the furthest it has
+    # ever been: a card sent back from review to ready has to pass review again, and saying
+    # otherwise would promise a step it is not going to skip. The furthest point is used only
+    # when the card is on a detour — `blocked` is not a step backwards, so a blocked card keeps
+    # the ground it made.
+    reached = [s["col"] for s in steps if s["col"] in PIPELINE]
+    if current in PIPELINE:
+        furthest = PIPELINE.index(current)
+    else:
+        furthest = max((PIPELINE.index(c) for c in reached), default=-1)
+    return {
+        "steps": steps,
+        "count": len(steps),
+        "current": current,
+        "detour": current if current in DETOURS else None,
+        "done": [c for c in PIPELINE[: furthest + 1]],
+        "remaining": PIPELINE[furthest + 1:],
+        "pipeline": PIPELINE,
+    }
+
+
+def _deps(task_id: str) -> dict:
+    """Hard dependencies, both directions. A parent that is not ``done`` is what actually holds a
+    card out of ``ready`` (``_parents_blocking_ready`` in the kanban plugin uses the same rule),
+    so ``unmet`` is the number the page should put in front of someone."""
+    parents = [dict(r) for r in _rows(_kanban_db(), (
+        "SELECT t.id, t.title, t.status, t.assignee FROM tasks t JOIN task_links l ON l.parent_id = t.id "
+        "WHERE l.child_id = ? ORDER BY t.status, t.id"), (task_id,))]
+    children = [dict(r) for r in _rows(_kanban_db(), (
+        "SELECT t.id, t.title, t.status, t.assignee FROM tasks t JOIN task_links l ON l.child_id = t.id "
+        "WHERE l.parent_id = ? ORDER BY t.status, t.id"), (task_id,))]
+    return {
+        "parents": parents,
+        "children": children,
+        "unmet": sum(1 for p in parents if p["status"] != "done"),
+    }
+
+
 def _session_for_pid(profile: str, pid: Optional[int]) -> Optional[dict]:
     """worker_pid -> that profile's lease -> session id. Verified exact on live workers; the
     ``task_runs.metadata.worker_session_id`` stamp is only written at completion, so it is
@@ -290,6 +386,9 @@ def build_panes() -> List[dict]:
             "cost_cap": w.get("max_cost"),
             "stats": _session_stats(row),
             "has_log": _worker_log(task_id).exists(),
+            "status": w.get("status"),
+            "timeline": _timeline(task_id, w.get("status")),
+            "deps": _deps(task_id),
         })
 
     for profile in _profiles():
@@ -327,6 +426,9 @@ def build_panes() -> List[dict]:
                 "cost_cap": None,
                 "stats": _session_stats(row),
                 "has_log": False,
+                "status": None,
+                "timeline": None,
+                "deps": None,
             })
 
     panes.sort(key=lambda p: (p["kind"] != "kanban", -(p.get("started_at") or 0)))
@@ -650,22 +752,104 @@ def get_stats(pane_id: str):
     return {"pane": pane_id, "stats": pane_stats(pane_id), "at": time.time()}
 
 
-@router.get("/panes/{pane_id}/card")
-def get_card(pane_id: str):
-    """The card behind a kanban pane — its body is the agent's actual brief."""
-    kind, _, task_id = pane_id.partition(":")
-    if kind != "k" or not _SAFE_TASK.match(task_id):
-        raise HTTPException(status_code=404, detail="no card for this pane")
+_CARD_COLS = ("id, title, body, assignee, status, priority, tenant, project_id, branch_name, max_cost, "
+              "created_at, started_at, completed_at, consecutive_failures, block_kind, last_failure_error")
+
+
+def _card_payload(task_id: str) -> dict:
+    """One card, everything a reader needs to act on it: the brief, where it has been, what it is
+    waiting on, what is waiting on it, its attempt history and the last of the conversation."""
     path = _kanban_db()
-    rows = _rows(path, "SELECT id, title, body, assignee, status, priority, tenant, project_id, branch_name, "
-                       "max_cost, created_at, started_at, consecutive_failures FROM tasks WHERE id = ?", (task_id,))
+    rows = _rows(path, f"SELECT {_CARD_COLS} FROM tasks WHERE id = ?", (task_id,))
     if not rows:
         raise HTTPException(status_code=404, detail="card not found")
     card = dict(rows[0])
     card["runs"] = [dict(r) for r in _rows(path, (
         "SELECT id, profile, status, outcome, started_at, ended_at, summary FROM task_runs "
         "WHERE task_id = ? ORDER BY id DESC LIMIT 12"), (task_id,))]
-    return {"card": card}
+    card["comments"] = [dict(r) for r in _rows(path, (
+        "SELECT id, author, body, created_at FROM task_comments WHERE task_id = ? "
+        "ORDER BY id DESC LIMIT 20"), (task_id,))][::-1]
+    card["timeline"] = _timeline(task_id, card.get("status"))
+    card["deps"] = _deps(task_id)
+    return card
+
+
+@router.get("/panes/{pane_id}/card")
+def get_pane_card(pane_id: str):
+    """The card behind a kanban pane — its body is the agent's actual brief."""
+    kind, _, task_id = pane_id.partition(":")
+    if kind != "k" or not _SAFE_TASK.match(task_id):
+        raise HTTPException(status_code=404, detail="no card for this pane")
+    return {"card": _card_payload(task_id)}
+
+
+@router.get("/cards/{task_id}")
+def get_card(task_id: str):
+    """Any card by id — what a dependency chip opens. Separate from the pane route because a
+    dependency is usually a card nothing is working on, so it has no pane."""
+    if not _SAFE_TASK.match(task_id):
+        raise HTTPException(status_code=400, detail="bad task id")
+    return {"card": _card_payload(task_id)}
+
+
+# Statuses that mean "not finished, not currently being worked" — the queue's population.
+_QUEUE_STATUSES = ("ready", "todo", "triage", "scheduled", "blocked", "review")
+# Rank inside the queue: how close a card is to a worker picking it up.
+_QUEUE_RANK = {"ready": 0, "review": 1, "todo": 2, "triage": 3, "scheduled": 4, "blocked": 5}
+
+
+def build_queue(limit: int = 60) -> dict:
+    """Up next: what the dispatcher will reach for, in the order it becomes reachable.
+
+    Ordered by whether anything still blocks the card, then by how close its column is to a
+    worker, then newest first — so a freshly minted card with nothing in front of it sits at the
+    top, and a card waiting on three unfinished parents sits at the bottom whatever its column.
+
+    A plain function, not just a route body, so it can be called directly from a script checking
+    the real board without FastAPI resolving its defaults.
+    """
+    placeholders = ",".join("?" * len(_QUEUE_STATUSES))
+    rows = _rows(_kanban_db(), (
+        f"SELECT {_CARD_COLS} FROM tasks WHERE status IN ({placeholders}) "
+        "ORDER BY created_at DESC LIMIT 400"), _QUEUE_STATUSES)
+    if not rows:
+        return {"queue": [], "count": 0, "at": time.time()}
+
+    # Dependencies for the whole queue in two queries rather than two per card: a board with a
+    # few hundred open cards would otherwise make this endpoint quadratic in link count.
+    ids = [r["id"] for r in rows]
+    marks = ",".join("?" * len(ids))
+    parents: Dict[str, List[dict]] = {}
+    for link in _rows(_kanban_db(), (
+            f"SELECT l.child_id, t.id, t.title, t.status, t.assignee FROM task_links l "
+            f"JOIN tasks t ON t.id = l.parent_id WHERE l.child_id IN ({marks})"), tuple(ids)):
+        parents.setdefault(link["child_id"], []).append(
+            {"id": link["id"], "title": link["title"], "status": link["status"], "assignee": link["assignee"]})
+    child_counts: Dict[str, int] = {}
+    for link in _rows(_kanban_db(), (
+            f"SELECT parent_id, COUNT(*) AS n FROM task_links WHERE parent_id IN ({marks}) "
+            "GROUP BY parent_id"), tuple(ids)):
+        child_counts[link["parent_id"]] = int(link["n"])
+
+    out = []
+    for row in rows:
+        card = dict(row)
+        mine = parents.get(card["id"], [])
+        blocked_by = [p for p in mine if p["status"] != "done"]
+        card["deps"] = {"unmet": len(blocked_by), "parents": mine,
+                        "children_count": child_counts.get(card["id"], 0)}
+        card["blocked_by"] = blocked_by
+        out.append(card)
+    out.sort(key=lambda c: (1 if c["deps"]["unmet"] else 0,
+                            _QUEUE_RANK.get(c["status"], 9),
+                            -(c.get("created_at") or 0)))
+    return {"queue": out[: int(limit)], "count": len(out), "at": time.time()}
+
+
+@router.get("/queue")
+def get_queue(limit: int = Query(60, ge=1, le=300)):
+    return build_queue(limit)
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────────────────────────────
