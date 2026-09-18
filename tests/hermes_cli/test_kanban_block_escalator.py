@@ -68,9 +68,17 @@ def test_overwatch_is_smith_never_switch_or_a_worker(mod):
 def test_trigger_table():
     m = _load_plugin_module()
     t = lambda kind, rec=0: m.should_trigger({"block_kind": kind, "block_recurrences": rec})[0]
-    assert t("cost_cap") and t("capability") and t("needs_input")
+    assert t("cost_cap") and t("capability")
     assert not t("operator_hold") and not t("dependency") and not t("scheduled")
     assert not t("transient", 0) and t("transient", 1)
+    # freeze-20260918: `needs_input` is a worker asking a QUESTION, not a fault, and it was
+    # 113 of 466 blocks in the week to 18 Sep — roughly a quarter of every overwatch session
+    # spawned, with supervision at 27% of fleet spend. It never triggers now, at any
+    # recurrence. Reporting is unchanged (escalation-watch, stalled-card-watch still see it);
+    # what stopped is paying a supervisor session to read it.
+    assert not t("needs_input", 0)
+    assert not t("needs_input", 1)
+    assert not t("needs_input", 9)
 
 
 def test_fault_block_spawns_one_smith_session_with_brief(mod, monkeypatch, tmp_path):
@@ -176,7 +184,10 @@ def test_second_transient_triggers(mod, monkeypatch, tmp_path):
 
 
 def test_second_overwatch_on_one_card_is_a_hard_stop(mod, monkeypatch, tmp_path):
-    db = _board(tmp_path, [("t_two", "x", "blocked", "needs_input", 0, "bob", 1.0)],
+    # freeze-20260918: fixture kind moved needs_input -> capability. This test is about the
+    # SECOND overwatch on one card being a hard stop; needs_input no longer triggers a first
+    # one, so it can no longer carry the case. capability is still a fault and still triggers.
+    db = _board(tmp_path, [("t_two", "x", "blocked", "capability", 0, "bob", 1.0)],
                 comments=[("t_two", "default", "overwatch: reassigned"), ("t_two", "default", "overwatch: split")])
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
     spawned, marked = [], []
