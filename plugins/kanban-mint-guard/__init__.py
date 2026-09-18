@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import datetime
 import re
 import sqlite3
 import subprocess
@@ -906,6 +907,72 @@ def _message_for(title: str, assignee: str, reason: str) -> str:
     return _message(title, assignee, reason)
 
 
+
+# ---------------------------------------------------------------------------
+# Rule 6 (2026-09-18, freeze-20260918, Richie): PLATFORM FINDINGS GO TO A LIST.
+#
+# Measured over 22 Aug - 18 Sep: 491 of 921 costed cards (53%) and $95.65 of $226.93
+# (42%) were the platform working on itself, and at peak 113 platform cards were minted
+# in 24 hours, 68 of them by overwatch. Each became a branch, a review round and a guard.
+# A finding is cheap; a card is not. So the finding is RECORDED and the card is refused.
+#
+# Escape hatch: `platform-approved:` in the body (Richie picks from the list weekly).
+# Fail-open like every other rule here - any error and the card is created.
+PLATFORM_FINDINGS = "PLATFORM-FINDINGS.md"
+PLATFORM_OVERRIDE = "platform-approved:"
+PLATFORM_TITLE = re.compile(r"^\s*\[\s*(platform|held)\b", re.I)
+# A business tag always wins: these are product cards even if they mention the platform.
+BUSINESS_TAG = re.compile(r"^\s*\[\s*(backupbrain|release|rova|weroll|mediaworks)\b", re.I)
+
+
+def _record_platform_finding(title: str, assignee: str, body: str) -> str:
+    """Append the finding to the list and return the path written."""
+    p = _hermes_root() / PLATFORM_FINDINGS
+    stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    text = str(body or "").strip()
+    if len(text) > 1500:
+        text = text[:1500] + "\n... (truncated)"
+    entry = (f"\n## {stamp} - {title.strip()}\n\n"
+             f"- proposed assignee: `{assignee or '(none)'}`\n"
+             f"- status: unreviewed\n\n{text}\n")
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write(entry)
+    return str(p)
+
+
+def platform_finding(title: str, assignee: str, body: str) -> Optional[str]:
+    """Return a refusal reason when this card is platform self-work."""
+    try:
+        t = str(title or "")
+        b = str(body or "")
+        if PLATFORM_OVERRIDE in b.lower():
+            return None
+        if BUSINESS_TAG.match(t):
+            return None
+        if not PLATFORM_TITLE.match(t):
+            return None
+        return "platform self-work - recorded as a finding instead of a card"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _platform_message(path: str) -> str:
+    return (
+        "Refusing to mint this card: it is PLATFORM SELF-WORK.\n\n"
+        "The finding has been recorded instead, at:\n"
+        f"  {path}\n\n"
+        "From 2026-09-18 the board builds the product; it does not build itself. Platform\n"
+        "findings accumulate in that file and Richie picks what gets done, weekly. This is a\n"
+        "measured decision, not a preference: over the month to 18 Sep, 53% of cards and 42%\n"
+        "of spend went to self-work while median cycle time tripled and first-pass review fell\n"
+        "to its worst recorded level.\n\n"
+        "Nothing is lost. Write the finding well - what breaks, the evidence, and the smallest\n"
+        "seam that would fix it - because that file is what gets read.\n\n"
+        "If Richie has already approved this specific piece of platform work, put\n"
+        "`platform-approved: <reason>` in the body and the guard stands down."
+    )
+
+
 def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, str]]:
     try:
         if payload.get("tool_name") != "kanban_create":
@@ -914,6 +981,15 @@ def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, str]]:
         title = str(args.get("title") or "")
         assignee = str(args.get("assignee") or "")
         body = str(args.get("body") or "")
+        pf = platform_finding(title, assignee, body)
+        if pf:
+            try:
+                path = _record_platform_finding(title, assignee, body)
+            except Exception:  # noqa: BLE001 -- never lose a card to a failed write
+                logger.exception("kanban-mint-guard: could not record platform finding, allowing")
+                return None
+            logger.warning("kanban-mint-guard: platform card refused, finding recorded (title=%r)", title[:80])
+            return {"action": "block", "message": _platform_message(path)}
         reason = verdict(title, assignee, body, args=args)
         if not reason:
             return None

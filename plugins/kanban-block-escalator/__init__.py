@@ -21,9 +21,10 @@ were ``operator_hold`` by design and 28 dependency waits that needed nobody;
 14 cost breaches each spawned ~4 more cards.
 
 Triggers (read from the board, never from substrings of the reason text):
-  cost_cap, capability, needs_input          -> always
+  cost_cap, capability                       -> always
   transient                                  -> on the SECOND occurrence
 Never: operator_hold (Richie's decision), dependency (self-resumes),
+  needs_input (a question, not a fault - reported, never supervised; 2026-09-18),
 scheduled (a date, not a fault).
 
 Hard stops (no overwatch; ceiling marker for escalation-watch -> Richie):
@@ -63,8 +64,16 @@ DEFAULT_ASSESSOR = OVERWATCH   # kept for older tools that import the name
 RUNTIME_ASSESSOR = OVERWATCH
 COST_ASSESSOR = OVERWATCH      # Steve-o no longer adjudicates spend (2026-09-06)
 
-ALWAYS_TRIGGER_KINDS = frozenset({"cost_cap", "capability", "needs_input"})
-NEVER_TRIGGER_KINDS = frozenset({"operator_hold", "dependency", "scheduled"})
+ALWAYS_TRIGGER_KINDS = frozenset({"cost_cap", "capability"})
+NEVER_TRIGGER_KINDS = frozenset({"operator_hold", "dependency", "scheduled",
+                                 "needs_input"})
+# 2026-09-18 (freeze-20260918, Richie): OVERWATCH ONLY ON FAULT-BLOCKS.
+# `needs_input` moved from ALWAYS to NEVER. It is a worker asking a question, not a
+# fault, and it was 113 of 466 blocks in the 7 days to 2026-09-18 — roughly a quarter
+# of every overwatch session spawned. Supervision had reached 27% of fleet spend.
+# Reporting is unaffected: escalation-watch and stalled-card-watch still surface these
+# to Richie. What stops is spending a supervisor session on them.
+# Revert: restore ALWAYS/NEVER above from __init__.py.bak-freeze-20260918.
 TRANSIENT_TRIGGER_AFTER = 1     # first transient retries; second triggers
 
 OVERWATCH_LIMIT = 2             # overwatch touches per card before Richie
