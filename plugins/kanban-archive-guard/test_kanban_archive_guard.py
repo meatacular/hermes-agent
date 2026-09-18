@@ -141,3 +141,30 @@ def test_NEGATIVE_CONTROL_neutering_orphaned_children_makes_the_incident_test_pa
     assert ag.verdict("t_69f8ec57", conn=board) is not None      # detected while intact
     monkeypatch.setattr(ag, "orphaned_children", lambda conn, cid: [])
     assert ag.verdict("t_69f8ec57", conn=board) is None          # and not, once neutered
+
+
+# ---------- the malformed-marker diagnostic (found by running, not by reading) ----------
+
+def test_a_malformed_marker_is_reported_not_silently_ignored(board):
+    """Found 2026-09-18 by the behavioural probe: `superseded-by: t_new` produced the generic
+    refusal, which reads as "the guard ignored my marker" rather than "your marker did not
+    parse". `new` is not hex, so the strict regex correctly refused it - but silently."""
+    add(board, "t_dup", "blocked"); add(board, "t_child", "todo")
+    link(board, "t_dup", "t_child")
+    msg = ag.verdict("t_dup", reason="superseded-by: t_new", conn=board)
+    assert msg is not None
+    assert "does not name a card id" in msg and "'t_new'" in msg
+
+def test_a_valid_marker_still_has_no_diagnostic(board):
+    """CONTROL: the note must appear ONLY when a marker is present and malformed."""
+    add(board, "t_dup", "blocked"); add(board, "t_child", "todo")
+    link(board, "t_dup", "t_child")
+    assert ag.verdict("t_dup", reason="superseded-by: t_d9dcd7e9", conn=board) is None
+
+def test_no_marker_at_all_gets_no_diagnostic(board):
+    """CONTROL: an archive with no marker gets the plain refusal, not a confusing note about
+    a marker the operator never wrote."""
+    add(board, "t_dup", "blocked"); add(board, "t_child", "todo")
+    link(board, "t_dup", "t_child")
+    msg = ag.verdict("t_dup", conn=board)
+    assert msg is not None and "does not name a card id" not in msg

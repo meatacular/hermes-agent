@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 ARCHIVE_TOOLS = frozenset({"kanban_archive", "kanban_archive_task", "archive_task"})
 TERMINAL = frozenset({"done", "archived"})
 SUPERSEDED_RE = re.compile(r"^\s*superseded-by:\s*(t_[0-9a-f]+)\s*$", re.M | re.I)
+# A marker that is PRESENT but does not name a card id must be reported, not silently ignored.
+# Found by running the behavioural probe 2026-09-18: `superseded-by: t_new` produced the generic
+# refusal, which reads as "the guard ignored my marker" rather than "your marker did not parse".
+SUPERSEDED_LOOSE = re.compile(r"^\s*superseded-by:\s*(\S.*)$", re.M | re.I)
 
 
 def _db_path() -> str:
@@ -59,6 +63,8 @@ def verdict(card_id: str, reason: str = "", body: str = "", conn=None) -> Option
         return None
     if SUPERSEDED_RE.search(reason or "") or SUPERSEDED_RE.search(body or ""):
         return None                                  # the successor is named: archive is safe
+    loose = SUPERSEDED_LOOSE.search(reason or "") or SUPERSEDED_LOOSE.search(body or "")
+    malformed = loose.group(1).strip() if loose else None
     own = False
     try:
         if conn is None:
@@ -77,6 +83,12 @@ def verdict(card_id: str, reason: str = "", body: str = "", conn=None) -> Option
             except Exception: pass
     if not kids:
         return None
+    hint = ""
+    if malformed:
+        hint = (f"\n\nNOTE: a `superseded-by:` line IS present but does not name a card id "
+                f"— it reads {malformed!r}. The escape hatch needs the successor's actual id "
+                f"(`t_` followed by hex, e.g. `superseded-by: t_d9dcd7e9`), because naming the "
+                f"card is what makes the archive safe. Right now this marker unlocks nothing.")
     return (
         f"Refusing to archive {card_id}: it still gates {len(kids)} non-terminal "
         f"card(s) whose only other parents are already terminal — {', '.join(kids)}.\n\n"
@@ -89,6 +101,7 @@ def verdict(card_id: str, reason: str = "", body: str = "", conn=None) -> Option
         f"(`hermes kanban link <successor> <child>`), then archive; or\n"
         f"  2. say what supersedes this card — put `superseded-by: <card-id>` in the archive "
         f"reason or the card body, which is the act that makes the archive safe."
+        + hint
     )
 
 

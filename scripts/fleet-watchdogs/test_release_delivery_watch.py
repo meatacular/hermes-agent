@@ -71,7 +71,7 @@ def test_merge_into_the_wrong_base_is_not_delivered(monkeypatch):
     """CONTROL for condition 2. Without the ancestor check this would pass."""
     monkeypatch.setattr(rdw, "sh", _fake_sh(MERGED_OK, ancestor_rc=1))
     ok, why = rdw.delivered(83, "r/r", "/tmp")
-    assert not ok and "not an ancestor of origin/main" in why
+    assert not ok and "NOT an ancestor of origin/main" in why
 
 def test_red_test_gate_on_the_merged_head_is_not_delivered(monkeypatch):
     """CONTROL for condition 3."""
