@@ -1,0 +1,183 @@
+/* Hermes fleet — Live page.
+   Every colour comes from the host's theme tokens, so the page follows whatever theme the
+   dashboard is wearing. The two literal accents are semantic and deliberate: amber = a worker
+   whose heartbeat has gone quiet, red = a worker whose process is gone. */
+
+.fl-root {
+  width: 100%;
+  padding: 4px 2px 96px;
+  color: var(--color-foreground);
+  font-size: 13px;
+}
+.fl-root button { font: inherit; cursor: pointer; }
+.fl-root pre { margin: 0; }
+
+/* ── page header ─────────────────────────────────────────────────────────────────────────── */
+.fl-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.fl-head h1 { font-size: 22px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+.fl-sub { font-size: 12.5px; color: var(--color-muted-foreground); margin-top: 2px; max-width: 70ch; }
+.fl-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.fl-select, .fl-btn, .fl-segbtn {
+  background: var(--color-card);
+  color: var(--color-foreground);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 6px);
+  padding: 4px 9px; font-size: 12.5px; line-height: 1.5;
+}
+.fl-btn:hover, .fl-segbtn:hover, .fl-select:hover { border-color: var(--color-primary); }
+.fl-btn.is-active { background: var(--color-primary); color: var(--color-primary-foreground); border-color: var(--color-primary); }
+.fl-seg { display: inline-flex; }
+.fl-seg .fl-segbtn { border-radius: 0; margin-left: -1px; min-width: 28px; text-align: center; }
+.fl-seg .fl-segbtn:first-child { border-radius: var(--radius-sm, 6px) 0 0 var(--radius-sm, 6px); margin-left: 0; }
+.fl-seg .fl-segbtn:last-child { border-radius: 0 var(--radius-sm, 6px) var(--radius-sm, 6px) 0; }
+.fl-seg .fl-segbtn.is-active { background: var(--color-primary); color: var(--color-primary-foreground); border-color: var(--color-primary); position: relative; z-index: 1; }
+
+.fl-conn { font-size: 11.5px; color: var(--color-muted-foreground); display: inline-flex; align-items: center; gap: 5px; }
+.fl-conn::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--color-muted-foreground); }
+.fl-conn.is-on::before { background: var(--color-success, #16a34a); }
+.fl-conn.is-off::before { background: var(--color-warning, #d97706); animation: fl-pulse 1.2s ease-in-out infinite; }
+
+.fl-blank {
+  border: 1px dashed var(--color-border); border-radius: var(--radius-lg, 12px);
+  padding: 48px 24px; text-align: center; color: var(--color-muted-foreground);
+}
+
+/* ── the grid: up to three columns, as many rows as there are agents ─────────────────────── */
+.fl-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(var(--fl-cols, 3), minmax(0, 1fr));
+  align-items: start;
+}
+@media (max-width: 1500px) { .fl-grid { grid-template-columns: repeat(min(var(--fl-cols, 3), 2), minmax(0, 1fr)); } }
+@media (max-width: 1000px) { .fl-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.fl-pane {
+  display: flex; flex-direction: column; min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg, 12px);
+  background: var(--color-card);
+  overflow: hidden;
+}
+/* Expanded: one pane takes the full width of the grid and gets room to read in. */
+.fl-pane.is-wide { grid-column: 1 / -1; }
+.fl-pane.is-wide .fl-feed { max-height: 60vh; }
+
+/* ── pane header ─────────────────────────────────────────────────────────────────────────── */
+.fl-pane-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 10px 7px; border-bottom: 1px solid var(--color-border);
+}
+.fl-pane-title {
+  flex: 1; min-width: 0; font-weight: 600; font-size: 13px; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.fl-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.fl-dot.is-live { background: var(--color-success, #16a34a); animation: fl-pulse 2s ease-in-out infinite; }
+.fl-dot.is-stale { background: var(--color-warning, #d97706); }
+.fl-dot.is-dead { background: var(--color-destructive, #dc2626); }
+@keyframes fl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+.fl-icon-btn {
+  background: transparent; border: 0; color: var(--color-muted-foreground);
+  padding: 2px 4px; border-radius: var(--radius-sm, 6px); flex: none;
+}
+.fl-icon-btn:hover { color: var(--color-foreground); background: color-mix(in srgb, var(--color-foreground) 8%, transparent); }
+
+.fl-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 7px 10px 0; }
+.fl-chip {
+  font-size: 11px; line-height: 1.6; padding: 0 6px; border-radius: 999px;
+  border: 1px solid var(--color-border); color: var(--color-muted-foreground);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fl-chip--agent { color: var(--color-primary); border-color: color-mix(in srgb, var(--color-primary) 45%, transparent); font-weight: 600; }
+.fl-chip--link { text-decoration: none; }
+.fl-chip--link:hover { border-color: var(--color-primary); color: var(--color-foreground); }
+.fl-chip--warn { color: var(--color-warning, #d97706); border-color: color-mix(in srgb, var(--color-warning, #d97706) 45%, transparent); }
+
+/* ── the numbers ─────────────────────────────────────────────────────────────────────────── */
+.fl-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; padding: 8px 10px 2px; }
+.fl-stat { min-width: 0; }
+.fl-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-muted-foreground); }
+.fl-stat-value { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.3; }
+.fl-stat-sub { font-size: 10.5px; color: var(--color-muted-foreground); height: 14px; line-height: 14px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The track has to be visible on its own, or a worker at 2% of its cap looks like a rendering
+   bug rather than a worker with room to spare. */
+.fl-bar { background: color-mix(in srgb, var(--color-foreground) 18%, transparent); border-radius: 999px;
+  height: 4px; margin: 4px 0 2px; width: 100%; max-width: 160px; }
+.fl-bar i { display: block; height: 100%; min-width: 3px; border-radius: 999px; background: var(--color-primary); }
+.fl-bar i.is-hot { background: var(--color-destructive, #dc2626); }
+
+/* ── tabs ────────────────────────────────────────────────────────────────────────────────── */
+.fl-tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--color-border); }
+.fl-tab {
+  background: transparent; border: 0; border-bottom: 2px solid transparent;
+  color: var(--color-muted-foreground); font-size: 11.5px; padding: 3px 7px 5px; text-transform: lowercase;
+}
+.fl-tab:hover { color: var(--color-foreground); }
+.fl-tab.is-active { color: var(--color-foreground); border-bottom-color: var(--color-primary); font-weight: 600; }
+
+/* ── the feed ────────────────────────────────────────────────────────────────────────────── */
+.fl-feed-wrap { position: relative; }
+.fl-feed {
+  max-height: 42vh; min-height: 180px; overflow-y: auto; overscroll-behavior: contain;
+  padding: 8px 10px 14px; display: flex; flex-direction: column; gap: 8px;
+  scrollbar-width: thin;
+}
+.fl-feed--idle { align-items: center; justify-content: center; }
+.fl-empty { color: var(--color-muted-foreground); font-size: 12px; padding: 18px 0; text-align: center; }
+
+.fl-ev { min-width: 0; }
+.fl-ev-label {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--color-muted-foreground); margin-bottom: 2px;
+}
+.fl-ev-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; font-size: 12.5px; }
+
+.fl-ev--thought { border-left: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent); padding-left: 8px; }
+.fl-ev--thought .fl-ev-text { color: var(--color-muted-foreground); font-style: normal; }
+.fl-ev--say { border-left: 2px solid var(--color-foreground); padding-left: 8px; }
+.fl-ev--say .fl-ev-text { color: var(--color-foreground); }
+.fl-ev--user { border-left: 2px dashed var(--color-border); padding-left: 8px; }
+
+/* The caret marks a block still being written — the page's only "it is happening now" signal
+   that survives a still screenshot. */
+.fl-caret {
+  display: inline-block; width: 6px; height: 13px; margin-left: 2px; vertical-align: text-bottom;
+  background: var(--color-primary); animation: fl-blink 1s steps(2, start) infinite;
+}
+@keyframes fl-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+.fl-ev--tool { display: flex; align-items: baseline; gap: 6px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; }
+.fl-tool-icon { flex: none; }
+.fl-tool-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-foreground); }
+.fl-tool-dur { flex: none; color: var(--color-muted-foreground); font-variant-numeric: tabular-nums; }
+
+.fl-raw {
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; line-height: 1.45;
+  white-space: pre-wrap; overflow-wrap: anywhere; color: var(--color-muted-foreground);
+  background: color-mix(in srgb, var(--color-foreground) 5%, transparent);
+  border-radius: var(--radius-sm, 6px); padding: 6px 8px;
+}
+.fl-more, .fl-loadmore {
+  background: transparent; border: 0; color: var(--color-primary);
+  font-size: 11px; padding: 3px 0;
+}
+.fl-loadmore { display: block; width: 100%; text-align: center; border-bottom: 1px solid var(--color-border); }
+
+.fl-card-body { padding: 10px; max-height: 42vh; overflow-y: auto; }
+
+/* ── the tail pill: the control that makes scroll-back safe ──────────────────────────────── */
+.fl-tailpill {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  background: var(--color-primary); color: var(--color-primary-foreground);
+  border: 0; border-radius: 999px; padding: 4px 12px; font-size: 11.5px; font-weight: 600;
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--color-foreground) 25%, transparent);
+  white-space: nowrap;
+}
+.fl-tailpill:hover { filter: brightness(1.08); }

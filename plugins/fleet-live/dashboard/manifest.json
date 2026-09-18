@@ -1,0 +1,14 @@
+{
+  "name": "fleet-live",
+  "label": "Live",
+  "description": "Every active agent's chain of thought, streaming as it happens — one pane per running worker and live session, with its purpose, assigned agent, model, cost, tokens and progress; panes load only when the tab is open and only when scrolled into view, and a pane you scroll back through holds its place until you return to the tail",
+  "icon": "Eye",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/live",
+    "position": "after:kanban"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
