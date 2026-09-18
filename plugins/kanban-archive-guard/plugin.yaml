@@ -1,0 +1,32 @@
+name: kanban-archive-guard
+version: 0.1.0
+kind: backend
+author: Claude (Cowork) for Richie, 2026-09-18
+description: >-
+  Refuse to archive a card that still gates non-terminal children, unless the archive
+  says what supersedes it.
+
+  THE DEFECT, measured 2026-09-18. `recompute_ready` (hermes_cli/kanban_db.py:2276)
+  treats an ARCHIVED parent as satisfied — `all(p['status'] in ('done','archived'))`.
+  That is right for a COMPLETED parent and wrong for a SUPERSEDED one, and those are two
+  different things wearing one status.
+
+  What it cost: t_69f8ec57 was archived as a duplicate of t_d9dcd7e9. t_34dd83a9 was parked
+  behind t_69f8ec57. The moment the parent was archived the parked child promoted itself,
+  claimed run 2637 and dispatched against the very red base it existed to wait behind. The
+  release card then refused to merge — correctly — because fleet-preflight's same-repo check
+  found a card in progress on the same repo. The two deadlocked each other: the release gated
+  on the child, the child's acceptance criterion gated on the release.
+
+  WHY A PLUGIN. `recompute_ready` is a kernel path and Richie's 2026-09-17 rule is that
+  platform fixes are plugins, watchdogs or config. This sits on upstream's `pre_tool_call`
+  hook and imports nothing from hermes_cli, so it has no merge surface. It cannot change how
+  an archived parent is *read* — it stops the archive that creates the situation, which is the
+  prevention half. Detection of any that slip through belongs to a watchdog.
+
+  DELIBERATELY NARROW, AND FAIL-OPEN. It blocks only when archiving would leave a
+  non-terminal child with no remaining non-terminal parent — i.e. exactly the un-gating case.
+  A `superseded-by: <card-id>` line in the reason or the card body is the escape hatch, because
+  naming the successor is precisely the act that makes the archive safe. Any uncertainty —
+  unreadable board, missing table, unexpected argument shape — ALLOWS the call. A guard that
+  crashes the archive path is worse than the gap it closes.
