@@ -86,7 +86,25 @@ def kanban_home(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_ac1_live_unknown_pid_is_not_reclaimed(kanban_home, monkeypatch):
+    """An unreaped but live worker must not be booked as ``pid N not alive``."""
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="live worker", assignee="worker")
+        host_prefix = kb._claimer_id().split(":", 1)[0]
+        assert kb.claim_task(conn, tid, claimer=f"{host_prefix}:mock") is not None
+        kbd._set_worker_pid(conn, tid, os.getpid())
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
 
+        sweep = kbd._reclaim_dead_workers(conn)
+
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert sweep.crashed == []
+        assert task.status == "running"
+        assert task.last_failure_error is None
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

@@ -1069,7 +1069,7 @@ def _classify_dead_worker(
     task_id: Optional[str] = None,
     started_at: Optional[int] = None,
     board: Optional[str] = None,
-) -> _DeadWorker:
+) -> Optional[_DeadWorker]:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
     FLEET: a clean exit is split three ways instead of always reading as a
@@ -1085,6 +1085,8 @@ def _classify_dead_worker(
     """
     dead = _classify_dead_worker_exit(pid, claimer, conn=conn, task_id=task_id,
                                       started_at=started_at, board=board)
+    if dead is None:
+        return None
     if task_id and not dead.rate_limited:
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
@@ -1099,9 +1101,15 @@ def _classify_dead_worker_exit(
     task_id: Optional[str] = None,
     started_at: Optional[int] = None,
     board: Optional[str] = None,
-) -> _DeadWorker:
-    """Exit status -> reclaim bookkeeping, before the worker's own words are folded in."""
+) -> Optional[_DeadWorker]:
+    """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
+
+    ``None`` means the exit registry had no status, but the PID is currently
+    alive; the caller must leave that claim untouched and wait for a later sweep.
+    """
     kind, code = _classify_worker_exit(pid)
+    if kind == "unknown" and _pid_alive(pid):
+        return None
     if kind == "clean_exit" and conn is not None and task_id is not None:
         dead = _classify_fleet_clean_exit(
             pid, code, claimer, conn=conn, task_id=task_id,
@@ -1185,6 +1193,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 pid, row["claim_lock"], conn=conn, task_id=row["id"],
                 started_at=started_at, board=board,
             )
+            if dead is None:
+                continue
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             if dead.workspace_error:
