@@ -261,13 +261,13 @@ _EVENT_COLUMN = {
 }
 
 
-def _timeline(task_id: str, status: Optional[str] = None) -> dict:
+def _timeline(task_id: str, status: Optional[str] = None, path: Optional[Path] = None) -> dict:
     """Where this card has been, in order, and what is still ahead of it.
 
     ``steps`` is the de-duplicated column history — consecutive events landing in the same column
     (four claims in a row, say) are one step, because a re-claim is a retry, not progress.
     """
-    rows = _rows(_kanban_db(), (
+    rows = _rows(path or _kanban_db(), (
         "SELECT kind, payload, created_at FROM task_events WHERE task_id = ? "
         "AND kind IN ('created','promoted','unblocked','claimed','review_requested','changes_requested',"
         "'review_reopened','completed','blocked','dependency_wait','scheduled','archived','gave_up','status') "
@@ -312,14 +312,15 @@ def _timeline(task_id: str, status: Optional[str] = None) -> dict:
     }
 
 
-def _deps(task_id: str) -> dict:
+def _deps(task_id: str, path: Optional[Path] = None) -> dict:
     """Hard dependencies, both directions. A parent that is not ``done`` is what actually holds a
     card out of ``ready`` (``_parents_blocking_ready`` in the kanban plugin uses the same rule),
     so ``unmet`` is the number the page should put in front of someone."""
-    parents = [dict(r) for r in _rows(_kanban_db(), (
+    path = path or _kanban_db()
+    parents = [dict(r) for r in _rows(path, (
         "SELECT t.id, t.title, t.status, t.assignee FROM tasks t JOIN task_links l ON l.parent_id = t.id "
         "WHERE l.child_id = ? ORDER BY t.status, t.id"), (task_id,))]
-    children = [dict(r) for r in _rows(_kanban_db(), (
+    children = [dict(r) for r in _rows(path, (
         "SELECT t.id, t.title, t.status, t.assignee FROM tasks t JOIN task_links l ON l.child_id = t.id "
         "WHERE l.parent_id = ? ORDER BY t.status, t.id"), (task_id,))]
     return {
@@ -756,22 +757,29 @@ _CARD_COLS = ("id, title, body, assignee, status, priority, tenant, project_id, 
               "created_at, started_at, completed_at, consecutive_failures, block_kind, last_failure_error")
 
 
-def _card_payload(task_id: str) -> dict:
+def _card_payload(task_id: str, board: Optional[str] = None) -> dict:
     """One card, everything a reader needs to act on it: the brief, where it has been, what it is
-    waiting on, what is waiting on it, its attempt history and the last of the conversation."""
-    path = _kanban_db()
+    waiting on, what is waiting on it, its attempt history and the last of the conversation.
+    ``board`` selects a named board (``kanban/boards/<slug>/``); omitted means the default."""
+    slug = board or "default"
+    if not _SAFE_PROFILE.match(slug):
+        raise HTTPException(status_code=400, detail="bad board")
+    path = _board_db(slug)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="board not found")
     rows = _rows(path, f"SELECT {_CARD_COLS} FROM tasks WHERE id = ?", (task_id,))
     if not rows:
         raise HTTPException(status_code=404, detail="card not found")
     card = dict(rows[0])
+    card["board"] = slug
     card["runs"] = [dict(r) for r in _rows(path, (
         "SELECT id, profile, status, outcome, started_at, ended_at, summary FROM task_runs "
         "WHERE task_id = ? ORDER BY id DESC LIMIT 12"), (task_id,))]
     card["comments"] = [dict(r) for r in _rows(path, (
         "SELECT id, author, body, created_at FROM task_comments WHERE task_id = ? "
         "ORDER BY id DESC LIMIT 20"), (task_id,))][::-1]
-    card["timeline"] = _timeline(task_id, card.get("status"))
-    card["deps"] = _deps(task_id)
+    card["timeline"] = _timeline(task_id, card.get("status"), path)
+    card["deps"] = _deps(task_id, path)
     return card
 
 
@@ -785,12 +793,12 @@ def get_pane_card(pane_id: str):
 
 
 @router.get("/cards/{task_id}")
-def get_card(task_id: str):
+def get_card(task_id: str, board: Optional[str] = Query(None, description="board slug; omit for the default")):
     """Any card by id — what a dependency chip opens. Separate from the pane route because a
     dependency is usually a card nothing is working on, so it has no pane."""
     if not _SAFE_TASK.match(task_id):
         raise HTTPException(status_code=400, detail="bad task id")
-    return {"card": _card_payload(task_id)}
+    return {"card": _card_payload(task_id, board or None)}
 
 
 # Statuses that mean "not finished, not currently being worked" — the queue's population.
@@ -850,6 +858,472 @@ def build_queue(limit: int = 60) -> dict:
 @router.get("/queue")
 def get_queue(limit: int = Query(60, ge=1, le=300)):
     return build_queue(limit)
+
+
+# ── Decisions ──────────────────────────────────────────────────────────────────────────────────
+# "What is waiting on me, what does each one unblock, and in what order do I do them." Read from
+# EVERY board (the default one and each ``kanban/boards/<slug>/``), read-only, and joined to the
+# open PRs of each tenant's repo through ``gh`` — cached for a minute, bounded to twenty seconds,
+# and fail-open: when ``gh`` cannot answer the entries still appear, marked ``pr_state:
+# "unavailable"``, because a stale ordering is worse than an honest "I could not check".
+#
+# The ordering rule is the product. Within one repo only ONE land card is "now": the open PR
+# that is mergeable (``CLEAN``) with the lowest number. Every other land card in that repo is
+# told to wait for it and re-check, because landing #22 can turn #24 from CLEAN to BEHIND, and
+# a list that said "merge both" is exactly the out-of-sync merge Richie asked to be spared.
+_GH_BIN = "/opt/homebrew/bin/gh"
+_GH_TIMEOUT_S = 20
+_PR_CACHE_TTL_S = 60
+_PR_CACHE: Dict[str, Tuple[float, Optional[List[dict]]]] = {}
+_PR_CACHE_LOCK = threading.Lock()
+
+# Same line-anchored grammar as release-operator-hold-watch / hold-marker-guard: the marker is a
+# line, never a mention in prose, and ``manual`` must be a whole token.
+_HOLD_MARKER = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+|>[ \t]*|#{1,6}[ \t]+)*"
+    r"(?:\*\*|__|`)?[ \t]*operator-hold[ \t]*:[ \t]*(?:\*\*|__|`)?[ \t]*manual\b",
+    re.IGNORECASE | re.MULTILINE)
+# ``hold: wait-pr-merged 18`` / ``hold: wait-main-green`` / ``hold: wait-date …`` — the
+# hold-condition-watch grammar, one per line.
+_HOLD_WAIT = re.compile(r"^[ \t]*hold[ \t]*:[ \t]*(wait-[a-z-]+(?:[ \t]+[^\n]*?)?)[ \t]*$",
+                        re.IGNORECASE | re.MULTILINE)
+# ``PR #22`` anywhere; a bare ``#22`` only in a title, where it cannot be an issue in prose.
+_PR_REF_ANY = re.compile(r"\bPR\s*#(\d{1,6})\b", re.IGNORECASE)
+_PR_REF_BARE = re.compile(r"(?<![\w/#])#(\d{1,6})\b")
+# A land card is one whose title says so; a held card that merely mentions a PR is a hold.
+_LAND_TITLE = re.compile(r"\bland(?:ing)?\b|\bmerge\b|^\s*\[release\]", re.IGNORECASE)
+_DECISION_KEYS = ("what", "impact", "if-not", "how")
+_LIVE_STATUSES = ("triage", "todo", "scheduled", "ready", "running", "blocked", "review")
+_TERMINAL = ("done", "archived")
+_DECISION_COLS = ("id, title, body, assignee, status, priority, tenant, project_id, branch_name, "
+                  "created_at, block_kind")
+
+
+def _board_db(slug: str) -> Path:
+    if slug in ("", "default"):
+        return _kanban_db()
+    return _root() / "kanban" / "boards" / slug / "kanban.db"
+
+
+def _boards() -> List[Tuple[str, Path]]:
+    """Every board with a database: ``default`` (``<root>/kanban.db``) then each
+    ``kanban/boards/<slug>/kanban.db``. ``_archived`` and other underscore dirs are skipped."""
+    out: List[Tuple[str, Path]] = []
+    default = _kanban_db()
+    if default.exists():
+        out.append(("default", default))
+    bdir = _root() / "kanban" / "boards"
+    try:
+        children = sorted(bdir.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        children = []
+    for child in children:
+        name = child.name
+        if not child.is_dir() or name.startswith("_") or name == "default" or not _SAFE_PROFILE.match(name):
+            continue
+        db = child / "kanban.db"
+        if db.exists():
+            out.append((name, db))
+    return out
+
+
+def _tenant_repos() -> Dict[str, str]:
+    """tenant -> ``ci_gate.repo`` from ``<root>/kanban-tenants.json``."""
+    try:
+        data = json.loads((_root() / "kanban-tenants.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: Dict[str, str] = {}
+    if not isinstance(data, dict):
+        return out
+    for name, cfg in data.items():
+        if not isinstance(cfg, dict):
+            continue
+        gate = cfg.get("ci_gate")
+        repo = gate.get("repo") if isinstance(gate, dict) else None
+        if repo:
+            out[str(name)] = str(repo)
+    return out
+
+
+def _gh_open_prs_uncached(repo: str) -> Optional[List[dict]]:
+    """``gh pr list`` for one repo, or None when gh is missing, slow or unhappy."""
+    import shutil
+    import subprocess
+    gh = _GH_BIN if os.path.exists(_GH_BIN) else shutil.which("gh")
+    if not gh or not re.match(r"^[\w.-]+/[\w.-]+$", repo):
+        return None
+    try:
+        proc = subprocess.run(
+            [gh, "pr", "list", "--repo", repo, "--state", "open", "--limit", "100",
+             "--json", "number,title,headRefName,baseRefName,mergeStateStatus,updatedAt"],
+            capture_output=True, text=True, timeout=_GH_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except ValueError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _open_prs(repo: str) -> Optional[List[dict]]:
+    """Cached for ``_PR_CACHE_TTL_S``; a failure is cached too, so a broken gh is not re-run on
+    every 30 s poll."""
+    now = time.time()
+    with _PR_CACHE_LOCK:
+        hit = _PR_CACHE.get(repo)
+        if hit and now - hit[0] < _PR_CACHE_TTL_S:
+            return hit[1]
+    result = _gh_open_prs_uncached(repo)
+    with _PR_CACHE_LOCK:
+        _PR_CACHE[repo] = (now, result)
+    return result
+
+
+def _decision_override(body: str) -> Dict[str, str]:
+    """A ``decision:`` block in the body — ``what:`` / ``impact:`` / ``if-not:`` / ``how:`` on
+    indented lines below it — is the author's own plain-English explanation and wins over
+    anything derived."""
+    out: Dict[str, str] = {}
+    lines = (body or "").splitlines()
+    i = 0
+    while i < len(lines):
+        if re.match(r"^\s*decision\s*:\s*$", lines[i], re.IGNORECASE):
+            i += 1
+            while i < len(lines) and lines[i][:1] in (" ", "\t"):
+                m = re.match(r"^\s+(what|impact|if-not|how)\s*:\s*(.*)$", lines[i], re.IGNORECASE)
+                if m and m.group(2).strip():
+                    out[m.group(1).lower()] = m.group(2).strip()
+                i += 1
+            break
+        i += 1
+    return out
+
+
+def _pr_numbers(title: str, body: str) -> List[int]:
+    found: List[int] = []
+    for m in _PR_REF_ANY.finditer(title or ""):
+        found.append(int(m.group(1)))
+    for m in _PR_REF_BARE.finditer(title or ""):
+        found.append(int(m.group(1)))
+    for m in _PR_REF_ANY.finditer(body or ""):
+        found.append(int(m.group(1)))
+    seen: List[int] = []
+    for n in found:
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+def _wait_condition_text(cond: str) -> str:
+    parts = cond.split(None, 1)
+    kind = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if kind == "wait-pr-merged" and arg:
+        return f"PR #{arg.lstrip('#')} to merge"
+    if kind == "wait-main-green":
+        return "main to go green"
+    if kind == "wait-date" and arg:
+        return f"the clock to reach {arg}"
+    return cond
+
+
+def _short(items: List[str], keep: int = 4) -> str:
+    if len(items) <= keep:
+        return ", ".join(items)
+    return ", ".join(items[:keep]) + f" and {len(items) - keep} more"
+
+
+def _board_decisions(slug: str, path: Path, repos: Dict[str, str],
+                     prs_by_repo: Dict[str, Optional[List[dict]]]) -> List[dict]:
+    rows = _rows(path, f"SELECT {_DECISION_COLS} FROM tasks WHERE status NOT IN ('done','archived')")
+    if not rows:
+        return []
+    cards = {r["id"]: dict(r) for r in rows}
+    status_of = {tid: c["status"] for tid, c in cards.items()}
+    # Links in both directions, one query; a parent that is done/archived is not in `cards`.
+    parents: Dict[str, List[dict]] = {}
+    children: Dict[str, List[dict]] = {}
+    for l in _rows(path, ("SELECT l.parent_id, l.child_id, p.title AS ptitle, p.status AS pstatus, "
+                          "c.title AS ctitle, c.status AS cstatus FROM task_links l "
+                          "LEFT JOIN tasks p ON p.id = l.parent_id LEFT JOIN tasks c ON c.id = l.child_id")):
+        if l["child_id"] in cards and l["pstatus"] not in _TERMINAL and l["pstatus"] is not None:
+            parents.setdefault(l["child_id"], []).append(
+                {"id": l["parent_id"], "title": l["ptitle"] or l["parent_id"], "status": l["pstatus"]})
+        if l["parent_id"] in cards and l["cstatus"] not in _TERMINAL and l["cstatus"] is not None:
+            children.setdefault(l["parent_id"], []).append(
+                {"id": l["child_id"], "title": l["ctitle"] or l["child_id"], "status": l["cstatus"]})
+
+    out: List[dict] = []
+    for tid, c in cards.items():
+        if not _SAFE_TASK.match(tid):
+            continue
+        body = c.get("body") or ""
+        title = c.get("title") or tid
+        # A marker on a card that is already ready/running is a leftover, not a gate.
+        held = (c.get("status") not in ("ready", "running")) and (
+            c.get("block_kind") == "operator_hold" or bool(_HOLD_MARKER.search(body)))
+        # A land card names its PR in the title; a PR mentioned only in the body is context.
+        is_land = bool(_LAND_TITLE.search(title)) and bool(_pr_numbers(title, ""))
+        wait_m = _HOLD_WAIT.search(body)
+        wait_cond = wait_m.group(1).strip() if wait_m else None
+        asks = c.get("status") == "blocked" and c.get("block_kind") in ("needs_input", "capability")
+        tenant = c.get("tenant") or ""
+        repo = repos.get(tenant) or ""
+        prs = _pr_numbers(title, body)
+        open_prs: Optional[List[dict]] = None
+        if repo and prs:
+            if repo not in prs_by_repo:
+                prs_by_repo[repo] = _open_prs(repo)
+            open_prs = prs_by_repo[repo]
+        pr_info: Optional[dict] = None
+        pr_num: Optional[int] = None
+        pr_state = "none"
+        if prs:
+            pr_num = prs[0]
+            if not repo:
+                pr_state = "unavailable"
+            elif open_prs is None:
+                pr_state = "unavailable"
+            else:
+                for p in open_prs:
+                    if int(p.get("number") or 0) in prs:
+                        pr_num = int(p["number"])
+                        pr_info = p
+                        break
+                pr_state = str(pr_info.get("mergeStateStatus") or "UNKNOWN") if pr_info else "not-open"
+        references_open_pr = pr_info is not None
+        if not (held or wait_cond or asks or references_open_pr):
+            continue
+
+        assignee = c.get("assignee") or ""
+        who = assignee or "an agent"
+        kids = children.get(tid, [])
+        unmet = parents.get(tid, [])
+        blocks_running = any(k["status"] == "running" for k in kids)
+        reason = ""
+        if asks:
+            ev = _rows(path, "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+                             "ORDER BY id DESC LIMIT 1", (tid,))
+            try:
+                reason = str((json.loads(ev[0]["payload"] or "{}") or {}).get("reason") or "") if ev else ""
+            except ValueError:
+                reason = ""
+            if reason.startswith("initial_status") or reason.startswith("created with block_kind"):
+                reason = ""
+        hold_condition = None
+        if wait_cond:
+            watch = _rows(path, ("SELECT body, created_at FROM task_comments WHERE task_id = ? "
+                                 "AND body LIKE '%hold-condition-watch%' ORDER BY id DESC LIMIT 1"), (tid,))
+            state = "pending"
+            note = ""
+            if watch:
+                note = str(watch[0]["body"] or "")
+                state = "satisfied" if "auto-release" in note.lower() else "pending"
+            hold_condition = {"condition": wait_cond, "text": _wait_condition_text(wait_cond),
+                              "state": state, "comment": note[:240]}
+
+        if asks and c.get("block_kind") == "needs_input":
+            kind = "question"
+        elif asks:
+            kind = "capability"
+        elif wait_cond and not (held and is_land and pr_state != "not-open"):
+            kind = "wait"
+        elif held and is_land and pr_state != "not-open":
+            kind = "release"
+        elif held:
+            kind = "hold"
+        else:
+            kind = "pr"
+
+        base = (pr_info or {}).get("baseRefName") or "main"
+        kid_titles = [k["title"] for k in kids]
+        if kind == "release":
+            what = f"Release: merge PR #{pr_num} into {base}"
+        elif kind == "question":
+            what = f"Question from {who}: {reason or title}"
+        elif kind == "capability":
+            what = f"{who} needs something it cannot do: {reason or title}"
+        elif kind == "wait":
+            what = f"Waiting for {hold_condition['text']}: {title}"
+        elif kind == "hold":
+            what = f"Waiting for you: {title}"
+        else:
+            what = f"Open PR #{pr_num} ({pr_state}): {title}"
+
+        if kids:
+            impact = f"Lets {len(kids)} parked card{'s' if len(kids) != 1 else ''} go: {_short(kid_titles)}."
+        else:
+            impact = "Nothing on the board is parked behind this card."
+        if kind == "question":
+            impact = f"Lets {who} continue. " + impact
+        if kind == "pr" and pr_info:
+            impact = f"PR #{pr_num} is open on {repo} and this card ({c.get('status')}) refers to it. " + impact
+        if pr_state == "not-open":
+            impact = f"PR #{pr_num} is no longer open on {repo} (merged or closed) — check whether this card is already finished. " + impact
+
+        status_word = "held" if held else str(c.get("status"))
+        if kids:
+            if_not = f"Stays {status_word}; {len(kids)} card{'s' if len(kids) != 1 else ''} stay parked: {_short(kid_titles)}."
+        else:
+            if_not = f"Stays {status_word}; nothing else is waiting on it."
+        if kind == "release":
+            if_not = f"PR #{pr_num} stays open and unmerged. " + if_not
+        if kind == "wait":
+            if_not = "Nothing to do — it releases itself when the condition is met. " + if_not
+
+        st = c.get("status")
+        if kind == "question":
+            how = "Click comment, type the answer, then click unblock so the agent picks it back up."
+        elif kind == "capability":
+            how = "Do the thing the agent cannot (or comment with a workaround), then click unblock."
+        elif kind == "wait":
+            how = ("Nothing yet: hold-condition-watch releases it when the condition is met. "
+                   "Click unblock only to skip the wait.")
+        elif st in ("blocked", "scheduled"):
+            how = "Click unblock — the card moves to ready and its agent does the work" + (
+                f" (merges PR #{pr_num})." if kind == "release" else ".")
+        elif st == "review":
+            how = "It is with the reviewer; leave it, or click triage to pull it back."
+        elif st == "running":
+            how = "An agent is on it now; nothing to click."
+        else:
+            how = "Click ready to hand it to an agent, or comment to leave a note."
+
+        override = _decision_override(body)
+        out.append({
+            "id": tid, "board": slug, "title": title, "status": st, "block_kind": c.get("block_kind"),
+            "assignee": assignee, "tenant": tenant, "repo": repo, "project_id": c.get("project_id"),
+            "branch": c.get("branch_name") or "", "created_at": c.get("created_at"),
+            "kind": kind, "held": held,
+            "pr": pr_num, "pr_state": pr_state,
+            "pr_title": (pr_info or {}).get("title"), "pr_head": (pr_info or {}).get("headRefName"),
+            "pr_base": (pr_info or {}).get("baseRefName"), "pr_updated_at": (pr_info or {}).get("updatedAt"),
+            "hold_condition": hold_condition,
+            "what": override.get("what") or what,
+            "impact": override.get("impact") or impact,
+            "if_not": override.get("if-not") or if_not,
+            "how": override.get("how") or how,
+            "override": bool(override),
+            "children": kids, "parents_unmet": unmet, "blocks_running": blocks_running,
+            "wait_text": None, "order": 0, "rank": 0, "tier": 0,
+        })
+    return out
+
+
+_KIND_ORDER = {"question": 0, "capability": 1, "release": 2, "hold": 3, "wait": 4, "pr": 5}
+
+
+def _tier(e: dict) -> int:
+    if e["kind"] == "question" and e["blocks_running"] and not e["parents_unmet"]:
+        return 0
+    if e["parents_unmet"]:
+        return 3
+    if e["kind"] == "release":
+        return 1
+    if e["kind"] in ("question", "capability", "hold"):
+        return 2
+    if e["kind"] == "wait":
+        return 2 if (e["hold_condition"] or {}).get("state") == "satisfied" else 4
+    return 5
+
+
+def _rank_group(items: List[dict]) -> None:
+    """One land at a time: the CLEAN open PR with the lowest number is first; the rest follow in
+    PR-number order and are told to wait for it. Unmet-parent cards go after met ones and name
+    the parent they wait on."""
+    for e in items:
+        e["tier"] = _tier(e)
+    items.sort(key=lambda e: (
+        e["tier"],
+        0 if (e["kind"] == "release" and e["pr_state"] == "CLEAN") else 1,
+        e["pr"] if e["pr"] is not None else 10 ** 9,
+        _KIND_ORDER.get(e["kind"], 9),
+        e.get("created_at") or 0,
+        e["id"],
+    ))
+    first_release: Optional[dict] = None
+    for e in items:
+        if e["kind"] != "release":
+            continue
+        if first_release is None:
+            first_release = e
+            if e["pr_state"] not in ("CLEAN", "unavailable", "none"):
+                e["wait_text"] = (f"PR #{e['pr']} is {e['pr_state']}, not CLEAN — bring it up to date "
+                                  f"(or fix its checks) before merging.")
+            elif e["pr_state"] == "unavailable":
+                e["wait_text"] = "PR state unavailable — check the PR page before merging."
+        else:
+            e["wait_text"] = (f"wait — land #{first_release['pr']} first, then re-check this one is still CLEAN")
+    # Now that the chain is known, the first one's impact names what comes next.
+    releases = [e for e in items if e["kind"] == "release"]
+    for i, e in enumerate(releases[:-1]):
+        if not e["override"]:
+            e["impact"] += f" Then PR #{releases[i + 1]['pr']} can be re-checked and landed next."
+    for e in items:
+        if e["parents_unmet"] and not e["override"]:
+            names = _short([p["title"] for p in e["parents_unmet"]], 3)
+            e["wait_text"] = (e["wait_text"] + " · " if e["wait_text"] else "") + f"waits on: {names}"
+    for i, e in enumerate(items, 1):
+        e["order"] = i
+
+
+def build_decisions() -> dict:
+    """Everything waiting on a person, grouped by repo and ranked so it can be done top to
+    bottom. A plain function so a script can call it against the real boards."""
+    repos = _tenant_repos()
+    prs_by_repo: Dict[str, Optional[List[dict]]] = {}
+    entries: List[dict] = []
+    boards_read: List[str] = []
+    for slug, path in _boards():
+        boards_read.append(slug)
+        try:
+            entries.extend(_board_decisions(slug, path, repos, prs_by_repo))
+        except Exception as exc:        # one bad board must not blank the page
+            log.warning("fleet-live: decisions on board %s failed: %s", slug, exc)
+    groups: Dict[str, List[dict]] = {}
+    for e in entries:
+        key = e["repo"] or e["tenant"] or "general"
+        e["group"] = key
+        groups.setdefault(key, []).append(e)
+    ordered_groups: List[dict] = []
+    for key in sorted(groups, key=lambda k: (k == "general", k)):
+        items = groups[key]
+        _rank_group(items)
+        ordered_groups.append({
+            "group": key, "repo": items[0]["repo"], "tenant": items[0]["tenant"],
+            "pr_state_available": bool(items[0]["repo"]) and prs_by_repo.get(items[0]["repo"]) is not None,
+            "entries": items,
+        })
+    rank = 0
+    flat: List[dict] = []
+    for g in ordered_groups:
+        for e in g["entries"]:
+            rank += 1
+            e["rank"] = rank
+            flat.append(e)
+    actionable = [e for e in flat if e["tier"] <= 2]
+    actionable.sort(key=lambda e: (e["tier"], e["rank"]))
+    nxt = actionable[0] if actionable else None
+    return {
+        "decisions": flat,
+        "groups": ordered_groups,
+        "next": {"id": nxt["id"], "board": nxt["board"], "what": nxt["what"], "how": nxt["how"],
+                 "group": nxt["group"], "order": nxt["order"]} if nxt else None,
+        "count": len(flat),
+        "boards": boards_read,
+        "pr_state": {repo: (prs is not None) for repo, prs in prs_by_repo.items()},
+        "at": time.time(),
+    }
+
+
+@router.get("/decisions")
+def get_decisions():
+    return build_decisions()
+
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────────────────────────────

@@ -432,3 +432,212 @@ def test_the_queue_excludes_work_already_running_or_finished(board):
     q = [c["id"] for c in board.get("/api/plugins/fleet-live/queue").json()["queue"]]
     assert "t_aaaa1111" not in q          # running
     assert "t_bbbb2222" not in q          # done
+
+
+# ── Decisions: what is waiting on a person, and in what order ─────────────────────────────────
+
+_OPEN_PRS = [
+    {"number": 24, "title": "later", "headRefName": "wt/24", "baseRefName": "main",
+     "mergeStateStatus": "BEHIND", "updatedAt": "2026-09-23T00:00:00Z"},
+    {"number": 22, "title": "sooner", "headRefName": "wt/22", "baseRefName": "main",
+     "mergeStateStatus": "CLEAN", "updatedAt": "2026-09-23T00:00:00Z"},
+]
+
+
+@pytest.fixture
+def decisions(client, monkeypatch):
+    """A temp home with a tenant map, a gh stub, and a board builder; every board these tests
+    build is a fresh sqlite file on that home, never the live fleet's."""
+    import sqlite3
+
+    api, home = client
+    (home / "kanban-tenants.json").write_text(json.dumps({
+        "weroll": {"id": "p_1", "slug": "weroll", "ci_gate": {"repo": "acme/weroll"}}}), encoding="utf-8")
+    monkeypatch.setattr(PLUGIN, "_PR_CACHE", {})
+    monkeypatch.setattr(PLUGIN, "_gh_open_prs_uncached", lambda repo: list(_OPEN_PRS))
+
+    def make_board(slug=None):
+        if slug:
+            path = home / "kanban" / "boards" / slug / "kanban.db"
+            path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            path = home / "kanban.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(_BOARD_SCHEMA)
+
+        class Board:
+            """The connection plus a one-line card writer."""
+            def task(self, tid, title, status, body="", block_kind=None, created=1000, assignee="bob"):
+                conn.execute("INSERT INTO tasks (id,title,body,assignee,status,created_at,tenant,block_kind) "
+                             "VALUES (?,?,?,?,?,?,'weroll',?)", (tid, title, body, assignee, status, created, block_kind))
+            def execute(self, *a):
+                return conn.execute(*a)
+            def commit(self):
+                conn.commit()
+            def close(self):
+                conn.close()
+        return Board()
+
+    return api, home, make_board
+
+
+def _get_decisions(api):
+    resp = api.get("/api/plugins/fleet-live/decisions")
+    assert resp.status_code == 200
+    return resp.json()
+
+
+def test_decisions_land_one_pr_at_a_time_in_pr_order(decisions):
+    """Two land cards for one repo: the CLEAN one is first whatever its position on the board,
+    the BEHIND one is second and told to wait for the first and re-check."""
+    api, _, make_board = decisions
+    conn = make_board()
+    conn.task("t_aaaa0024", "[Release] Land PR #24 — HELD for Richie", "blocked",
+              "operator-hold: manual\n\nmerge steps…", block_kind="operator_hold", created=500)
+    conn.task("t_aaaa0022", "[Release] Land PR #22 — HELD for Richie", "blocked",
+              "operator-hold: manual\n\nmerge steps…", block_kind="operator_hold", created=900)
+    conn.commit(); conn.close()
+
+    body = _get_decisions(api)
+    assert body["count"] == 2 and body["boards"] == ["default"]
+    (group,) = body["groups"]
+    assert group["repo"] == "acme/weroll" and group["pr_state_available"] is True
+    first, second = group["entries"]
+    assert (first["id"], first["order"], first["pr"], first["pr_state"]) == ("t_aaaa0022", 1, 22, "CLEAN")
+    assert (second["id"], second["order"], second["pr"], second["pr_state"]) == ("t_aaaa0024", 2, 24, "BEHIND")
+    assert first["wait_text"] is None
+    assert second["wait_text"] == "wait — land #22 first, then re-check this one is still CLEAN"
+    assert first["what"] == "Release: merge PR #22 into main"
+    assert "PR #24 can be re-checked and landed next" in first["impact"]
+    assert first["how"].startswith("Click unblock")
+    assert body["next"]["id"] == "t_aaaa0022"
+
+
+def test_decisions_put_a_question_that_blocks_running_work_before_releases(decisions):
+    api, _, make_board = decisions
+    conn = make_board()
+    conn.task("t_aaaa0022", "[Release] Land PR #22", "blocked", "operator-hold: manual",
+              block_kind="operator_hold", created=100)
+    conn.task("t_bbbb0001", "Which auth provider should the login use?", "blocked", "",
+              block_kind="needs_input", created=2000, assignee="karl")
+    conn.task("t_cccc0001", "Build the login page", "running", "", created=2100)
+    conn.execute("INSERT INTO task_links VALUES ('t_bbbb0001','t_cccc0001')")
+    conn.execute("INSERT INTO task_events (task_id,kind,payload,created_at) VALUES "
+                 "('t_bbbb0001','blocked',?,2001)", (json.dumps({"reason": "need the provider name"}),))
+    conn.commit(); conn.close()
+
+    body = _get_decisions(api)
+    (group,) = body["groups"]
+    ids = [e["id"] for e in group["entries"]]
+    assert ids == ["t_bbbb0001", "t_aaaa0022"]
+    question = group["entries"][0]
+    assert question["kind"] == "question" and question["blocks_running"] is True
+    assert question["what"] == "Question from karl: need the provider name"
+    assert "Build the login page" in question["impact"] and "Build the login page" in question["if_not"]
+    assert "comment" in question["how"] and "unblock" in question["how"]
+    assert body["next"]["id"] == "t_bbbb0001"
+
+
+def test_decisions_honour_a_decision_block_in_the_body(decisions):
+    api, _, make_board = decisions
+    conn = make_board()
+    conn.task("t_aaaa0022", "[Release] Land PR #22", "blocked",
+              "operator-hold: manual\n\ndecision:\n  what: Ship the login fix to everyone\n"
+              "  impact: Customers stop seeing the blank page\n  if-not: The blank page stays until Monday\n"
+              "  how: Press unblock; Rodge merges it within the hour\n\nmore prose",
+              block_kind="operator_hold")
+    conn.commit(); conn.close()
+
+    (entry,) = _get_decisions(api)["decisions"]
+    assert entry["override"] is True
+    assert entry["what"] == "Ship the login fix to everyone"
+    assert entry["impact"] == "Customers stop seeing the blank page"
+    assert entry["if_not"] == "The blank page stays until Monday"
+    assert entry["how"] == "Press unblock; Rodge merges it within the hour"
+
+
+def test_decisions_survive_gh_being_down(decisions, monkeypatch):
+    """Fail open: the entries are still there, marked unavailable, and the page is told the
+    repo's PR state is unverified rather than shown nothing."""
+    api, _, make_board = decisions
+    monkeypatch.setattr(PLUGIN, "_PR_CACHE", {})
+    monkeypatch.setattr(PLUGIN, "_gh_open_prs_uncached", lambda repo: None)
+    conn = make_board()
+    conn.task("t_aaaa0022", "[Release] Land PR #22", "blocked", "operator-hold: manual", block_kind="operator_hold")
+    conn.task("t_aaaa0024", "[Release] Land PR #24", "blocked", "operator-hold: manual", block_kind="operator_hold")
+    conn.commit(); conn.close()
+
+    body = _get_decisions(api)
+    assert [e["pr_state"] for e in body["decisions"]] == ["unavailable", "unavailable"]
+    assert [e["pr"] for e in body["decisions"]] == [22, 24]          # PR-number order still holds
+    assert body["groups"][0]["pr_state_available"] is False
+    assert body["pr_state"] == {"acme/weroll": False}
+    assert "unavailable" in body["decisions"][0]["wait_text"]
+
+
+def test_decisions_are_empty_not_broken_when_there_is_no_board(decisions):
+    api, _, _ = decisions
+    body = _get_decisions(api)
+    assert body["decisions"] == [] and body["groups"] == [] and body["count"] == 0
+    assert body["next"] is None and body["boards"] == []
+
+
+def test_decisions_read_every_board_and_name_the_board(decisions):
+    api, _, make_board = decisions
+    d = make_board()
+    d.task("t_aaaa0022", "[Release] Land PR #22", "blocked", "operator-hold: manual", block_kind="operator_hold")
+    d.commit(); d.close()
+    n = make_board("weroll")
+    n.task("t_dddd0001", "Choose the launch date", "blocked", "", block_kind="needs_input", assignee="axel")
+    n.commit(); n.close()
+
+    body = _get_decisions(api)
+    assert body["boards"] == ["default", "weroll"]
+    by_id = {e["id"]: e for e in body["decisions"]}
+    assert by_id["t_aaaa0022"]["board"] == "default"
+    assert by_id["t_dddd0001"]["board"] == "weroll"
+    # The modal route can then open the named board's card.
+    card = api.get("/api/plugins/fleet-live/cards/t_dddd0001?board=weroll").json()["card"]
+    assert card["title"] == "Choose the launch date" and card["board"] == "weroll"
+    assert api.get("/api/plugins/fleet-live/cards/t_dddd0001").status_code == 404
+
+
+def test_decisions_list_unmet_parents_after_met_ones_and_name_the_parent(decisions):
+    api, _, make_board = decisions
+    conn = make_board()
+    conn.task("t_aaaa0022", "[Release] Land PR #22", "blocked", "operator-hold: manual",
+              block_kind="operator_hold", created=100)
+    conn.task("t_pppp0001", "Finish the migration first", "running", "", created=50)
+    conn.task("t_aaaa0021", "[Release] Land PR #21", "blocked", "operator-hold: manual",
+              block_kind="operator_hold", created=60)
+    conn.execute("INSERT INTO task_links VALUES ('t_pppp0001','t_aaaa0021')")
+    conn.commit(); conn.close()
+
+    (group,) = _get_decisions(api)["groups"]
+    ids = [e["id"] for e in group["entries"]]
+    assert ids == ["t_aaaa0022", "t_aaaa0021"]         # #21 is older but gated, so it goes last
+    gated = group["entries"][1]
+    assert [p["id"] for p in gated["parents_unmet"]] == ["t_pppp0001"]
+    assert "waits on: Finish the migration first" in gated["wait_text"]
+
+
+def test_decisions_show_a_wait_condition_and_whether_the_watch_met_it(decisions):
+    api, _, make_board = decisions
+    conn = make_board()
+    conn.task("t_wwww0001", "Deploy after the fix lands", "blocked", "hold: wait-pr-merged 22\n\nsteps…",
+              block_kind="operator_hold")
+    conn.task("t_wwww0002", "Announce after main is green", "blocked", "hold: wait-main-green",
+              block_kind="operator_hold")
+    conn.execute("INSERT INTO task_comments (task_id,author,body,created_at) VALUES "
+                 "('t_wwww0002','default','UNBLOCK: auto-release by hold-condition-watch: wait-main-green: main CI is green',5)")
+    conn.commit(); conn.close()
+
+    by_id = {e["id"]: e for e in _get_decisions(api)["decisions"]}
+    pending = by_id["t_wwww0001"]
+    assert pending["kind"] == "wait"
+    assert pending["hold_condition"] == {"condition": "wait-pr-merged 22", "text": "PR #22 to merge",
+                                         "state": "pending", "comment": ""}
+    assert pending["what"].startswith("Waiting for PR #22 to merge")
+    assert by_id["t_wwww0002"]["hold_condition"]["state"] == "satisfied"
+    # A satisfied wait is actionable, a pending one is not: it sorts first.
+    assert by_id["t_wwww0002"]["order"] < pending["order"]

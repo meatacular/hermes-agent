@@ -1,5 +1,5 @@
 name: kanban-completion-gate
-version: 0.2.0
+version: 0.3.0
 kind: backend
 author: Agent Smith (WeRoll fleet)
 description: >-
@@ -33,5 +33,25 @@ description: >-
   0.2.0 (2026-09-17, card t_a858dad6): BUNDLED as kind: backend. As a user plugin in
   ~/.hermes/plugins it loaded only under root's HERMES_HOME (trap 28) — no kanban
   worker ever ran it, so charter rule 3 was enforced by nothing from 2026-09-09.
+
+  0.3.0 (2026-09-23, P3-done-requires-pr): "done requires an OPEN, GREEN PR against
+  the trunk". PLATFORM-FINDINGS 09-20 22:19: a build card could be built, pushed,
+  reviewed and marked done with NO PR, while every landing mechanism keys on a PR
+  number; the kernel gate (tools/kanban_ci_gate.py) only fires for `scope: release`
+  titles. Now, for a BUILD-LANE `worktree` card (title not `[Release]...`) of a tenant
+  with a `ci_gate` entry, kanban_complete additionally requires, in order:
+    1. an OPEN PR from tasks.branch_name into the trunk (tenant `trunk`, default
+       `main`) — `gh pr list --repo <ci_gate.repo> --head <branch> --state open`;
+    2. the PR head SHA == refs/remotes/origin/<branch> (falls back to the worktree
+       HEAD and says so);
+    3. `ci_gate.check_name` completed/success on that head (statusCheckRollup, the
+       same read as the kernel gate).
+  Each refusal names WHICH of the three is missing and the command that fixes it.
+  When all three hold and the handoff `result` lacks `PR #<n>`, the hook returns an
+  `action: modify` directive appending it, so landing can key on the number.
+  Escape hatch: body line `done-without-pr: <reason>` (docs-only / spike cards).
+  Kill switch: HERMES_KANBAN_PR_GATE_DISABLE=1. Fails OPEN with a logged warning on
+  gh/git/network faults (25 s bound on gh) — consistent with the rest of this
+  plugin; `[Release]` cards are left to the kernel gate untouched.
 provides_hooks:
   - pre_tool_call

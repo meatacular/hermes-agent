@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 __all__ = ["register", "on_pre_tool_call", "verdict", "declared_extension_point",
-           "branch_citations", "worktree_base_conflict", "dir_workspace_conflict"]
+           "branch_citations", "worktree_base_conflict", "dir_workspace_conflict",
+           "tenant_project_conflict", "branch_target_injection", "land_card_conflict",
+           "repo_tenant_for", "bound_project_for", "in_worktree_scope"]
 
 logger = logging.getLogger(__name__)
 
@@ -458,15 +460,17 @@ def _hermes_root() -> Path:
     return Path.home() / ".hermes"
 
 
-def _board_meta() -> dict:
+def _board_meta(board: Any = None) -> dict:
     """``board.json`` for the active board, read without importing hermes_cli.
 
-    Mirrors ``kanban_db.kanban_home()/boards_root()``: HERMES_KANBAN_BOARD, else
-    ``<root>/kanban/current``, else ``default``. Absent/unreadable -> {} (fail open). No
-    fallback to ANOTHER board's metadata: the wrong board's default_workdir is a wrong answer.
+    Mirrors ``kanban_db.kanban_home()/boards_root()``: the call's explicit ``board`` arg
+    (2026-09-23: the tool takes one, and the kernel reads THAT board's project_id), else
+    HERMES_KANBAN_BOARD, else ``<root>/kanban/current``, else ``default``. Absent/unreadable ->
+    {} (fail open). No fallback to ANOTHER board's metadata: the wrong board's default_workdir
+    is a wrong answer.
     """
     root = _hermes_root()
-    slug = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    slug = str(board or "").strip() or (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
     if not slug:
         try:
             slug = (root / "kanban" / "current").read_text().strip().splitlines()[0]
@@ -568,7 +572,7 @@ def worktree_repo_for(args: dict) -> Optional[str]:
     project = str(args.get("project") or "").strip()
     if project:
         return _project_primary_path(project)
-    meta = _board_meta()
+    meta = _board_meta(args.get("board"))
     return _project_primary_path(meta.get("project_id")) or (meta.get("default_workdir") or None)
 
 
@@ -770,6 +774,14 @@ def verdict(title: str, assignee: str, body: Any = "", args: Any = None) -> Opti
         dir_reason = dir_workspace_conflict(args)
         if dir_reason:
             return dir_reason
+        # Rule 7 (2026-09-23): the tenant/project/base contract. Also a property of the
+        # DELIVERABLE (which repo, which branch namespace), so it sits with rules 5 and 6.
+        tenant_reason = tenant_project_conflict(args)
+        if tenant_reason:
+            return tenant_reason
+        land_reason = land_card_conflict(args)
+        if land_reason:
+            return land_reason
 
     a = (assignee or "").strip().lower()
     if not a or not (title or "").strip():
@@ -898,6 +910,10 @@ def _message_for(title: str, assignee: str, reason: str) -> str:
         return _worktree_message(reason)
     if reason.startswith(DIR_REASON_PREFIX):
         return _dir_message(reason)
+    if reason.startswith(TENANT_REASON_PREFIX):
+        return _tenant_message(reason)
+    if reason.startswith(LAND_REASON_PREFIX):
+        return _land_message(reason)
     if reason.startswith("extension-point"):
         return _ladder_message(reason)
     if reason.startswith("this review-lane card"):
@@ -973,7 +989,410 @@ def _platform_message(path: str) -> str:
     )
 
 
-def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, str]]:
+
+
+# ---------------------------------------------------------------------------
+# Rule 7 (2026-09-23, p1-20260923 / P2-mint-contract): THE MINT-TIME TENANT /
+# PROJECT / BASE CONTRACT.
+#
+# THE DEFECT (kernel `hermes_cli/kanban_db.py`, read only): an explicit `tenant` never
+# binds the project. `create_task` fills `project_id` from the BOARD's default first
+# (:1357-1361) and consults the tenant map only when `project_obj is None and
+# workspace_kind == "scratch"` (:1402-1404). On the default board — whose board.json
+# `project_id` is `p_3d4a6fe1` (BackupBrain) — a `[WeRoll]` card minted with
+# `tenant="weroll-app"` and no `project` therefore binds BackupBrain, and its worktree is
+# cut on a `backupbrain/t_…` branch (t_32e1fb81, 2026-09-22 21:35, the third such card).
+# The `kanban-mint` skill already says "always pass both tenant AND project"; an
+# instruction is not enforcement (see hold-marker-guard for the same lesson).
+#
+# The kernel is frozen, so the contract is enforced HERE, on the args the kernel will
+# see, in three parts — each fail-open on any exception, like every rule above:
+#   7a  a worktree card's PROJECT must belong to the same tenant as its REPO. The repo
+#       tenant is resolved from the explicit `tenant` arg, else the title's business tag,
+#       else an explicit `workspace_path`, else a `worktree:` / `repo:` / `workspace:` line
+#       in the body, else the board's `default_workdir`. The project the kernel WOULD bind
+#       is the explicit `project` arg, else the board's `project_id`. When the two name
+#       different tenants the mint is REFUSED and the message says exactly what to pass.
+#   7b  a BUILD-lane worktree card carries `branch-target: <trunk>` (the kanban-mint
+#       skill's spelling). Absent, it is INJECTED — `{"action": "modify"}`, the same
+#       mechanism hold-marker-guard uses — never refused. The trunk is the tenant's
+#       `trunk` key when present, else `main`.
+#   7c  a LAND card (`[Release] Land PR #<n>`) must open with `operator-hold: manual` or
+#       carry a `hold: <condition>` line, and only one land card per tenant may be
+#       `running` at a time. Escape hatch: `land-serialisation: waived <reason>`.
+#
+# Overlap with kanban-project-link-guard: none — that guard refuses only an EXPLICIT
+# `project` that resolves nowhere; this rule reads a project that DOES resolve and asks
+# whether it is the right one. Tenants that are two spellings of one repo (`backupbrain`
+# and `backupbrain-legacy` share `ci_gate.repo`) are the same tenant to this rule, so the
+# default board's legacy `default_workdir` cannot refuse a BackupBrain card.
+TENANT_REASON_PREFIX = "tenant/project"
+LAND_REASON_PREFIX = "land card"
+BRANCH_TARGET_KEY = "branch-target"
+BRANCH_TARGET_LINE = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+)?(?:\*\*|__|`)?[ \t]*branch[-_ ]target[ \t]*(?:\*\*|__|`)?"
+    r"[ \t]*[:=][ \t]*(?P<v>\S+)", re.I | re.M)
+# `worktree: ~/Projects/weroll-app` / `repo: …` / `workspace: …` — the body's own statement of
+# the repo (the kanban-mint skill's "workspace:" line is the third spelling).
+REPO_REF_LINE = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+)?(?:\*\*|__|`)?[ \t]*(?:worktree|repo|workspace)[ \t]*(?:\*\*|__|`)?"
+    r"[ \t]*:[ \t]*`?(?P<v>~?/[^`\s]+)`?", re.I | re.M)
+LAND_TITLE = re.compile(r"^\s*\[\s*release\s*\]\s*land\s+pr\s*#\s*(?P<n>\d+)", re.I)
+# The hold-marker-guard / release-operator-hold-watch line, restricted to `manual`.
+_HOLD_MANUAL = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+|>[ \t]*|#{1,6}[ \t]+)*"
+    r"(?:\*\*|__|`)?[ \t]*operator-hold[ \t]*:[ \t]*(?:\*\*|__|`)?[ \t]*manual\b", re.I)
+# hold-condition-watch's `hold: <type> [value]` line (its own parser: `^hold:\s*(\S+)`).
+_HOLD_CONDITION = re.compile(r"^[ \t]*(?:[-*+][ \t]+)?`?hold`?[ \t]*:[ \t]*(?P<v>\S+)", re.I | re.M)
+_LAND_WAIVER = re.compile(r"^[ \t]*(?:[-*+][ \t]+)?`?land-seriali[sz]ation`?[ \t]*:[ \t]*waived\b(?P<why>[^\n]*)",
+                          re.I | re.M)
+_LAND_STATUSES = ("running",)
+_TITLE_TENANT_TAG = re.compile(r"^\s*\[\s*(?P<t>[a-z][a-z0-9 ._-]{1,20})\s*\]", re.I)
+
+
+def _fleet_root() -> Path:
+    """`~/.hermes` for the FLEET, never a profile dir. In a worker HERMES_HOME is
+    `<fleet>/profiles/<p>`; the tenant map lives one level up (kernel `_fleet_home`)."""
+    root = _hermes_root()
+    try:
+        if root.parent.name == "profiles":
+            root = root.parent.parent
+    except Exception:  # noqa: BLE001
+        pass
+    return root
+
+
+def _tenants() -> dict:
+    """`kanban-tenants.json` as a dict, or {} on ANY problem (a broken file stands rule 7 down).
+    `HERMES_KANBAN_TENANTS` overrides the path, exactly as it does for the kernel."""
+    try:
+        override = (os.environ.get("HERMES_KANBAN_TENANTS") or "").strip()
+        p = Path(override).expanduser() if override else _fleet_root() / "kanban-tenants.json"
+        data = json.loads(p.read_text(encoding="utf-8") or "{}")
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items() if isinstance(v, dict) and v.get("primary_path")}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _norm_path(p: Any) -> Optional[str]:
+    s = str(p or "").strip().strip("`'\"")
+    if not s:
+        return None
+    try:
+        path = Path(s).expanduser()
+        try:
+            path = path.resolve()
+        except Exception:  # noqa: BLE001
+            pass
+        return str(path).rstrip("/")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _tenant_for_path(path: Any, tenants: dict) -> Optional[str]:
+    """The tenant KEY whose `primary_path` is `path` or contains it (longest match), or None."""
+    target = _norm_path(path)
+    if not target:
+        return None
+    best, best_len = None, -1
+    for key, ent in tenants.items():
+        prim = _norm_path(ent.get("primary_path"))
+        if not prim:
+            continue
+        if target == prim or target.startswith(prim + "/"):
+            if len(prim) > best_len:
+                best, best_len = key, len(prim)
+    return best
+
+
+def _tenant_for_name(name: Any, tenants: dict) -> Optional[str]:
+    """Tenant KEY for a tenant key / slug / display name / project id, case-insensitive."""
+    tok = str(name or "").strip().strip("`'\"").lower()
+    if not tok:
+        return None
+    for key, ent in tenants.items():
+        if tok in {str(key).lower(), str(ent.get("slug") or "").lower(),
+                   str(ent.get("name") or "").lower(), str(ent.get("id") or "").lower()}:
+            return key
+    return None
+
+
+def _same_tenant(a: str, b: str, tenants: dict) -> bool:
+    """Two tenant keys are one tenant when equal or when they gate the same GitHub repo
+    (`backupbrain` and `backupbrain-legacy` are two paths to one project)."""
+    if a == b:
+        return True
+    ra = str(((tenants.get(a) or {}).get("ci_gate") or {}).get("repo") or "").lower()
+    rb = str(((tenants.get(b) or {}).get("ci_gate") or {}).get("repo") or "").lower()
+    return bool(ra) and ra == rb
+
+
+def _explicit_project(args: dict) -> Optional[str]:
+    """The caller's explicit `project` (key PRESENT, like kanban-project-link-guard reads it);
+    "" means "no project" and returns ""; absent returns None."""
+    raw = args["project"] if "project" in args else args.get("project_id")
+    if raw is None:
+        return None
+    return str(raw).strip()
+
+
+def repo_tenant_for(args: dict, tenants: dict, meta: Optional[dict] = None) -> Optional[str]:
+    """The tenant whose repo this card's work lands in, by the sources listed on rule 7a."""
+    key = _tenant_for_name(args.get("tenant"), tenants)
+    if key:
+        return key
+    m = _TITLE_TENANT_TAG.match(str(args.get("title") or ""))
+    if m:
+        key = _tenant_for_name(m.group("t"), tenants)
+        if key:
+            return key
+    key = _tenant_for_path(args.get("workspace_path"), tenants)
+    if key:
+        return key
+    m = REPO_REF_LINE.search(_text(args.get("body")))
+    if m:
+        key = _tenant_for_path(m.group("v"), tenants)
+        if key:
+            return key
+    meta = meta if meta is not None else _board_meta(args.get("board"))
+    return _tenant_for_path(meta.get("default_workdir"), tenants)
+
+
+def bound_project_for(args: dict, meta: Optional[dict] = None) -> tuple:
+    """``(project_id, source)`` the kernel would bind: explicit `project`, else the board's
+    `project_id`. ``(None, …)`` when no project would bind (explicit "" or a project-less board)."""
+    explicit = _explicit_project(args)
+    if explicit is not None:
+        return (explicit or None), "explicit"
+    meta = meta if meta is not None else _board_meta(args.get("board"))
+    pid = str(meta.get("project_id") or "").strip() or None
+    return pid, f"board `{meta.get('slug') or os.environ.get('HERMES_KANBAN_BOARD') or 'default'}` default"
+
+
+def in_worktree_scope(args: dict) -> bool:
+    """Rule 5's test (`workspace_kind == 'worktree'`) widened by the shapes the kernel UPGRADES
+    to a worktree: no `workspace_kind` at all plus a project that will bind, an explicit
+    `tenant`, or a `worktree:`/`repo:`/`workspace:` line. An explicit `scratch`/`dir` is out."""
+    kind = str(args.get("workspace_kind") or "").strip().lower()
+    if kind == "worktree":
+        return True
+    if kind:
+        return False
+    if str(args.get("tenant") or "").strip():
+        return True
+    if REPO_REF_LINE.search(_text(args.get("body"))):
+        return True
+    return _explicit_project(args) not in (None, "")
+
+
+def _board_slug_for_project(pid: str) -> Optional[str]:
+    """A board whose board.json binds `pid`, for the refusal's `--board` hint. None if none."""
+    try:
+        root = _hermes_root() / "kanban" / "boards"
+        for child in sorted(root.iterdir()):
+            try:
+                meta = json.loads((child / "board.json").read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(meta, dict) and str(meta.get("project_id") or "") == pid and not meta.get("archived"):
+                return child.name
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def tenant_project_conflict(args: Any, tenants: Optional[dict] = None,
+                            board_meta: Optional[dict] = None) -> Optional[str]:
+    """Refusal reason for rule 7a, or None. `tenants` / `board_meta` are the tests' seams."""
+    try:
+        if not isinstance(args, dict) or not in_worktree_scope(args):
+            return None
+        tenants = tenants if tenants is not None else _tenants()
+        if not tenants:
+            return None                       # no map, broken map -> nothing to check against
+        meta = board_meta if board_meta is not None else _board_meta(args.get("board"))
+        repo_key = repo_tenant_for(args, tenants, meta)
+        if not repo_key:
+            return None                       # the repo is not a tenant's -> not our contract
+        pid, source = bound_project_for(args, meta)
+        if not pid:
+            return None                       # no project binds -> a scratch card, rule 5's world
+        proj_key = _tenant_for_name(pid, tenants)
+        if not proj_key:
+            return None                       # a projects.db-only project: cannot judge, fail open
+        if _same_tenant(repo_key, proj_key, tenants):
+            return None
+        want = tenants[repo_key]
+        got = tenants[proj_key]
+        return (f"{TENANT_REASON_PREFIX}: this card's work lands in {want['primary_path']} "
+                f"(tenant `{repo_key}`), but the project the kernel would bind is `{pid}` "
+                f"({got.get('name') or proj_key}, from the {source}) — its worktree would be cut in "
+                f"{got['primary_path']} on a `{got.get('slug') or proj_key}/t_…` branch")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _tenant_message(reason: str) -> str:
+    tenants = _tenants()
+    m = re.search(r"tenant `([^`]+)`", reason)
+    key = m.group(1) if m else None
+    ent = tenants.get(key or "", {}) if tenants else {}
+    pid = ent.get("id") or f"<{key or 'tenant'}'s project id>"
+    board = _board_slug_for_project(str(pid)) if ent else None
+    board_hint = (f"`board=\"{board}\"` (CLI: `--board {board}`)" if board
+                  else f"a board whose board.json `project_id` is `{pid}` (none exists yet — "
+                       f"`hermes kanban boards create <slug> --default-workdir {ent.get('primary_path', '<repo>')}` "
+                       f"and set `project_id` in its board.json)")
+    return (
+        f"Refusing to mint this card: {reason}.\n\n"
+        "An explicit `tenant` never binds the project: `create_task` takes the BOARD's default\n"
+        "`project_id` first and consults the tenant map only for a project-less scratch card. So a\n"
+        "card for one tenant minted on another tenant's board gets the wrong repo AND a branch\n"
+        "namespaced to the wrong project — t_32e1fb81 (2026-09-22) was the third such card: a\n"
+        "`[WeRoll]` card whose branch was `backupbrain/t_32e1fb81-…`. The kanban-mint skill\n"
+        "already says to pass both; this rule makes it so.\n\n"
+        "Proceed one of two ways:\n"
+        f"  * pass `project=\"{pid}\"` together with `tenant=\"{key or '<tenant>'}\"` on this call;\n"
+        f"  * or mint it on that tenant's own board: {board_hint}.\n\n"
+        "If the project really is the right one, name the repo the card should use: an explicit\n"
+        "`workspace_path` under that project's `primary_path`, or drop the `tenant`/`worktree:`\n"
+        "claim that names the other repo."
+    )
+
+
+def branch_target_injection(args: Any, tenants: Optional[dict] = None,
+                            board_meta: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+    """Rule 7b: the args to ADD (`{"body": ...}`) so a build-lane worktree card carries
+    `branch-target: <trunk>`, or None when it already does / is out of scope. Never raises."""
+    try:
+        if not isinstance(args, dict) or not in_worktree_scope(args):
+            return None
+        if _lane(str(args.get("title") or "")) != "build":
+            return None
+        body = _text(args.get("body"))
+        if BRANCH_TARGET_LINE.search(body):
+            return None
+        tenants = tenants if tenants is not None else _tenants()
+        trunk = "main"
+        if tenants:
+            meta = board_meta if board_meta is not None else _board_meta(args.get("board"))
+            key = repo_tenant_for(args, tenants, meta)
+            if not key:
+                pid, _src = bound_project_for(args, meta)
+                key = _tenant_for_name(pid, tenants) if pid else None
+            if key:
+                trunk = str((tenants.get(key) or {}).get("trunk") or "main").strip() or "main"
+        line = f"{BRANCH_TARGET_KEY}: {trunk}"
+        if not body.strip():
+            return {"body": line + "\n"}
+        return {"body": body.rstrip("\n") + "\n\n" + line + "\n"}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _board_db_path(board: Any = None) -> Optional[Path]:
+    """The board's kanban.db, resolved the way `kanban_db.kanban_db_path` does, without
+    importing it: HERMES_KANBAN_DB pins it; `default` -> `<root>/kanban.db`; else the board dir."""
+    pinned = (os.environ.get("HERMES_KANBAN_DB") or "").strip()
+    if pinned:
+        return Path(pinned).expanduser()
+    root = _hermes_root()
+    slug = str(board or "").strip() or (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    if not slug:
+        try:
+            slug = (root / "kanban" / "current").read_text().strip().splitlines()[0]
+        except Exception:  # noqa: BLE001
+            slug = "default"
+    if slug in ("", "default"):
+        return root / "kanban.db"
+    return root / "kanban" / "boards" / slug / "kanban.db"
+
+
+def _land_cards_running(tenant: str, board: Any = None):
+    """`[(id, title)]` of `running` land cards for `tenant` on the board — stdlib sqlite,
+    read-only URI, bounded. Raises on failure; the caller fails open."""
+    db = _board_db_path(board)
+    if not db or not db.exists():
+        return []
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+    try:
+        marks = ",".join("?" * len(_LAND_STATUSES))
+        rows = conn.execute(
+            f"SELECT id, title FROM tasks WHERE status IN ({marks}) AND tenant = ? "
+            "AND title LIKE '[Release] Land PR%' LIMIT 20", (*_LAND_STATUSES, tenant)).fetchall()
+    finally:
+        conn.close()
+    return [(r[0], r[1]) for r in rows if LAND_TITLE.match(str(r[1] or ""))]
+
+
+def land_card_conflict(args: Any, tenants: Optional[dict] = None,
+                       board_reader=None) -> Optional[str]:
+    """Refusal reason for rule 7c, or None. `board_reader(tenant, board)` is the tests' seam."""
+    try:
+        if not isinstance(args, dict):
+            return None
+        title = str(args.get("title") or "")
+        m = LAND_TITLE.match(title)
+        if not m:
+            return None
+        body = _text(args.get("body"))
+        lines = [ln for ln in body.splitlines() if ln.strip()]
+        first_ok = bool(lines) and bool(_HOLD_MANUAL.match(lines[0]))
+        if not first_ok and not _HOLD_CONDITION.search(body):
+            return (f"{LAND_REASON_PREFIX}: `[Release] Land PR #{m.group('n')}` carries neither "
+                    "`operator-hold: manual` as its first line nor a `hold: <condition>` line")
+        if _LAND_WAIVER.search(body):
+            return None
+        tenants = tenants if tenants is not None else _tenants()
+        tenant = str(args.get("tenant") or "").strip()
+        if not tenant and tenants:
+            tenant = repo_tenant_for(args, tenants) or ""
+        if not tenant:
+            tenant = (os.environ.get("HERMES_TENANT") or "").strip()
+        if not tenant:
+            return None                       # no tenant to serialise on -> fail open
+        try:
+            running = (board_reader or _land_cards_running)(tenant, args.get("board"))
+        except Exception:  # noqa: BLE001
+            return None
+        if running:
+            tid, other = running[0]
+            return (f"{LAND_REASON_PREFIX}: another land card for tenant `{tenant}` is already running "
+                    f"({tid} {str(other)[:70]!r})")
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _land_message(reason: str) -> str:
+    if "already running" in reason:
+        return (
+            f"Refusing to mint this card: {reason}.\n\n"
+            "Land cards for one tenant are SERIALISED: two merges to the same trunk in flight race\n"
+            "each other's head-identity check and CI tip, and the second lands on a base its review\n"
+            "never saw. Mint this one held (`operator-hold: manual` first line, or\n"
+            "`hold: wait-pr-merged <n>` naming the running one's PR) so it dispatches after that\n"
+            "card is done — or wait for it.\n\n"
+            "If both really must run together, put `land-serialisation: waived <reason>` in the body\n"
+            "and this rule stands down."
+        )
+    return (
+        f"Refusing to mint this card: {reason}.\n\n"
+        "A land card is a human gate. release-operator-hold-watch keeps a hold ONLY when the body\n"
+        "declares `operator-hold: manual`; hold-condition-watch auto-releases on a `hold: …` line.\n"
+        "A land card with neither is released and dispatched within a minute of minting, which is\n"
+        "the 'merged before Richie saw it' defect.\n\n"
+        "Re-mint with the body starting\n"
+        "    operator-hold: manual\n"
+        "or with a machine-readable condition line, one of\n"
+        "    hold: wait-pr-merged <number> | hold: wait-main-green | hold: wait-date <ISO> | hold: manual\n"
+        "(passing `hold=true` alone appends the marker at the END of the body; the watcher wants it first)."
+    )
+
+
+def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, Any]]:
     try:
         if payload.get("tool_name") != "kanban_create":
             return None
@@ -992,6 +1411,14 @@ def on_pre_tool_call(**payload: Any) -> Optional[Dict[str, str]]:
             return {"action": "block", "message": _platform_message(path)}
         reason = verdict(title, assignee, body, args=args)
         if not reason:
+            # Rule 7b: nothing refuses, so a build-lane worktree card without a
+            # `branch-target:` line gets one. ``{"action": "modify", "args": {...}}``
+            # shallow-merges into the call's args (hermes_cli/plugins.py), exactly as
+            # hold-marker-guard appends `operator-hold: manual`.
+            add = branch_target_injection(args)
+            if add:
+                logger.info("kanban-mint-guard: injecting %r into %r", add["body"].splitlines()[-1], title[:80])
+                return {"action": "modify", "args": add}
             return None
         logger.warning("kanban-mint-guard: refusing kanban_create — %s (title=%r assignee=%r)",
                        reason, title[:80], assignee)

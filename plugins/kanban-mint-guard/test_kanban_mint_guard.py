@@ -839,3 +839,253 @@ def test_shared_dir_rule_ignores_non_build_neighbours_and_fails_open(tmp_path):
     assert mg.dir_workspace_conflict(_dir_args(str(d), title="[Verify] x"), repo_root_for=lambda p: p, board_reader=lambda path: [("t_1", "[build] implement y")]) is None
     def boom(path): raise RuntimeError("board unreadable")
     assert mg.dir_workspace_conflict(_dir_args(str(d), title="[build] implement x"), repo_root_for=lambda p: p, board_reader=boom) is None
+
+
+# --- rule 7: the mint-time tenant / project / base contract (2026-09-23, P2-mint-contract) ---
+# The defect: an explicit `tenant` never binds the project (kanban_db.create_task fills
+# project_id from the BOARD first, and reads the tenant map only for a project-less scratch
+# card), so a `[WeRoll]` card minted on the default board — whose project is BackupBrain —
+# got `backupbrain/t_…` as its branch in the weroll-app repo (t_32e1fb81, the third such card).
+# Every fixture here is hermetic: a tmp fleet root with its own board.json files, a tmp
+# tenants map, a tmp kanban.db. Nothing touches ~/.hermes.
+import json as _json
+import sqlite3 as _sqlite3
+
+P7_BB = "/Users/x/Projects/backupbrain-anchor"
+P7_BB_LEGACY = "/Users/x/Projects/backupbrain"
+P7_WR = "/Users/x/Projects/weroll-app"
+P7_TENANTS = {
+    "backupbrain": {"id": "p_3d4a6fe1", "slug": "backupbrain", "name": "BackupBrain",
+                    "primary_path": P7_BB, "ci_gate": {"repo": "meatacular/backupbrain"}},
+    "backupbrain-legacy": {"id": "p_backupbrain_legacy", "slug": "backupbrain-legacy",
+                           "name": "BackupBrain (legacy primary path)", "primary_path": P7_BB_LEGACY,
+                           "ci_gate": {"repo": "meatacular/backupbrain"}},
+    "weroll-app": {"id": "p_weroll_app", "slug": "weroll-app", "name": "WeRoll",
+                   "primary_path": P7_WR, "ci_gate": {"repo": "meatacular/weroll-app"}},
+}
+
+
+@pytest.fixture
+def fleet(tmp_path, monkeypatch):
+    """A tmp fleet root: default board = BackupBrain (legacy default_workdir, exactly like the
+    real one), `weroll` board = WeRoll, a tenants map, an empty board db. Returns the root."""
+    root = tmp_path / "hermes"
+    for slug, workdir, pid in (("default", P7_BB_LEGACY, "p_3d4a6fe1"), ("weroll", P7_WR, "p_weroll_app")):
+        d = root / "kanban" / "boards" / slug
+        d.mkdir(parents=True)
+        (d / "board.json").write_text(_json.dumps(
+            {"slug": slug, "default_workdir": workdir, "project_id": pid, "archived": False}))
+    (root / "kanban-tenants.json").write_text(_json.dumps(P7_TENANTS))
+    db = root / "kanban.db"
+    conn = _sqlite3.connect(db)
+    conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, status TEXT, tenant TEXT)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(root))
+    monkeypatch.setenv("HERMES_KANBAN_TENANTS", str(root / "kanban-tenants.json"))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    monkeypatch.delenv("HERMES_TENANT", raising=False)
+    return root
+
+
+def _p7_hook(**args):
+    return mg.on_pre_tool_call(tool_name="kanban_create", args=args)
+
+
+def _p7_running_land(root, tenant="weroll-app", tid="t_running1"):
+    conn = _sqlite3.connect(root / "kanban.db")
+    conn.execute("INSERT INTO tasks VALUES (?, ?, 'running', ?)",
+                 (tid, "[Release] Land PR #21 (reviewed head aaa) — HELD for Richie", tenant))
+    conn.commit()
+    conn.close()
+
+
+# (a) the defect: a WeRoll worktree card on the default (BackupBrain) board, no explicit project
+def test_a_weroll_card_on_the_backupbrain_board_is_refused_and_told_what_to_pass(fleet):
+    out = _p7_hook(title="[WeRoll] Build the LCP fix", assignee="bob", tenant="weroll-app",
+                   workspace_kind="worktree", body="Do the thing.")
+    assert out and out["action"] == "block"
+    assert "tenant/project" in out["message"]
+    assert "`p_3d4a6fe1`" in out["message"], "the project the kernel WOULD bind must be named"
+    assert 'project="p_weroll_app"' in out["message"], "the fix must be spelled out"
+    assert "--board weroll" in out["message"], "the tenant's own board must be offered"
+    assert "backupbrain/t_" in out["message"], "the wrong branch namespace must be named"
+
+
+def test_a_the_reason_also_fires_from_verdict_without_an_assignee(fleet):
+    # a property of the deliverable: no assignee, no lane, still refused
+    args = {"title": "[WeRoll] Recorded performance finding", "tenant": "weroll-app",
+            "workspace_kind": "worktree", "body": "HELD"}
+    assert mg.verdict("", "", "HELD", args=args).startswith("tenant/project")
+
+
+def test_a_the_title_tag_alone_names_the_tenant(fleet):
+    # t_32e1fb81's shape: `[WeRoll]` title, tenant given; but even with NO tenant arg the
+    # business tag is read, because that is what a human reads
+    args = {"title": "[WeRoll] Build it", "workspace_kind": "worktree", "body": ""}
+    assert mg.tenant_project_conflict(args) is not None
+
+
+def test_a_a_worktree_line_in_the_body_names_the_repo(fleet):
+    args = {"title": "Build it", "workspace_kind": "worktree",
+            "body": f"workspace: {P7_WR}\nDo it."}
+    assert mg.tenant_project_conflict(args) is not None
+    args["body"] = f"workspace: {P7_BB}\nDo it."
+    assert mg.tenant_project_conflict(args) is None
+
+
+# (b) NEGATIVE CONTROL: the same card with the explicit project passes
+def test_b_negative_control_explicit_project_passes(fleet):
+    out = _p7_hook(title="[WeRoll] Build the LCP fix", assignee="bob", tenant="weroll-app",
+                   project="p_weroll_app", workspace_kind="worktree",
+                   body="Do the thing.\nbranch-target: main")
+    assert out is None
+    # ...and on the tenant's own board, no explicit project needed
+    out = _p7_hook(title="[WeRoll] Build the LCP fix", assignee="bob", tenant="weroll-app",
+                   board="weroll", workspace_kind="worktree", body="x\nbranch-target: main")
+    assert out is None
+
+
+def test_b_control_the_rule_is_not_vacuous(fleet, monkeypatch):
+    args = {"title": "[WeRoll] Build it", "tenant": "weroll-app", "workspace_kind": "worktree", "body": "x"}
+    assert mg.verdict("[WeRoll] Build it", "bob", "x", args=args) is not None
+    monkeypatch.setattr(mg, "tenant_project_conflict", lambda *a, **k: None)
+    assert mg.verdict("[WeRoll] Build it", "bob", "x", args=args) is None, \
+        "the refusal comes from somewhere other than rule 7a"
+
+
+# (c) a BackupBrain card on the BackupBrain board passes — including via the legacy workdir
+def test_c_a_backupbrain_card_on_the_backupbrain_board_passes(fleet):
+    for extra in ({"tenant": "backupbrain"}, {}, {"tenant": "backupbrain-legacy"},
+                  {"workspace_path": P7_BB + "/.worktrees/t_x"}):
+        args = {"title": "[BackupBrain] Build the digest", "assignee": "bob",
+                "workspace_kind": "worktree", "body": "x\nbranch-target: main", **extra}
+        assert _p7_hook(**args) is None, f"FALSE POSITIVE with {extra}"
+
+
+def test_c_out_of_scope_shapes_are_untouched(fleet):
+    # explicit scratch / dir / project="" are not worktree cards the kernel would bind
+    for extra in ({"workspace_kind": "scratch"}, {"workspace_kind": "dir", "workspace_path": P7_WR},
+                  {"project": ""}):
+        args = {"title": "[WeRoll] Build it", "tenant": "weroll-app", "body": "x", **extra}
+        assert mg.tenant_project_conflict(args) is None, extra
+
+
+# (d) branch-target injection
+def test_d_missing_branch_target_is_injected_as_main(fleet):
+    out = _p7_hook(title="[WeRoll] Build it", assignee="bob", tenant="weroll-app",
+                   project="p_weroll_app", workspace_kind="worktree", body="Do it.")
+    assert out == {"action": "modify", "args": {"body": "Do it.\n\nbranch-target: main\n"}}
+    # an empty body gets just the line
+    out = _p7_hook(title="Build it", assignee="bob", tenant="backupbrain", workspace_kind="worktree")
+    assert out["args"]["body"] == "branch-target: main\n"
+
+
+def test_d_present_branch_target_is_untouched_and_non_build_cards_get_none(fleet):
+    for body in ("branch-target: main\nDo it.", "- **branch-target**: `develop`", "Do it.\nBranch_Target = main"):
+        assert _p7_hook(title="[WeRoll] Build it", assignee="bob", tenant="weroll-app",
+                        project="p_weroll_app", workspace_kind="worktree", body=body) is None, body
+    # a review card is not a build card: nothing to inject
+    assert _p7_hook(title="[WeRoll] Verify the LCP fix", assignee="steve-o", tenant="weroll-app",
+                    project="p_weroll_app", workspace_kind="worktree", body="x") is None
+
+
+def test_d_the_tenant_trunk_key_wins_over_main(fleet):
+    tenants = _json.loads((fleet / "kanban-tenants.json").read_text())
+    tenants["weroll-app"]["trunk"] = "develop"
+    (fleet / "kanban-tenants.json").write_text(_json.dumps(tenants))
+    out = _p7_hook(title="[WeRoll] Build it", assignee="bob", tenant="weroll-app",
+                   project="p_weroll_app", workspace_kind="worktree", body="x")
+    assert out["args"]["body"].endswith("branch-target: develop\n")
+
+
+def test_d_injection_never_accompanies_a_refusal(fleet):
+    out = _p7_hook(title="[WeRoll] Build it", assignee="bob", tenant="weroll-app",
+                   workspace_kind="worktree", body="x")
+    assert out["action"] == "block" and "args" not in out
+
+
+# (e) land cards must be held
+def test_e_a_land_card_without_a_hold_is_refused(fleet):
+    out = _p7_hook(title="[Release] Land PR #22 (reviewed head 22730a0) — HELD for Richie",
+                   assignee="default", tenant="weroll-app", project="p_weroll_app", body="Merge it.")
+    assert out and out["action"] == "block"
+    assert "land card" in out["message"] and "operator-hold: manual" in out["message"]
+    # the marker at the END of the body (what `hold=true` alone would give) is not the contract
+    out = _p7_hook(title="[Release] Land PR #22", assignee="default", tenant="weroll-app",
+                   project="p_weroll_app", body="Merge it.\n\noperator-hold: manual\n")
+    assert out and "first line" in out["message"]
+
+
+def test_e_a_held_land_card_passes(fleet):
+    for body in ("operator-hold: manual\n\nMerge it.", "\n  operator-hold: manual\nx",
+                 "Merge after review.\nhold: wait-pr-merged 22", "hold: manual"):
+        assert _p7_hook(title="[Release] Land PR #22 (reviewed head 22730a0)", assignee="default",
+                        tenant="weroll-app", project="p_weroll_app", body=body) is None, body
+
+
+def test_e_only_land_cards_are_in_scope():
+    assert mg.land_card_conflict({"title": "[Release] Deploy the thing", "body": "x"}) is None
+    assert mg.land_card_conflict({"title": "Land PR #22", "body": "x"}) is None
+
+
+# (f) one running land card per tenant
+def test_f_a_second_land_card_while_one_runs_is_refused(fleet):
+    _p7_running_land(fleet)
+    out = _p7_hook(title="[Release] Land PR #22 (reviewed head 22730a0)", assignee="default",
+                   tenant="weroll-app", project="p_weroll_app", body="operator-hold: manual\n\nMerge it.")
+    assert out and out["action"] == "block"
+    assert "already running" in out["message"] and "t_running1" in out["message"]
+    assert "land-serialisation: waived" in out["message"]
+
+
+def test_f_the_waiver_and_another_tenant_pass(fleet):
+    _p7_running_land(fleet)
+    ok = _p7_hook(title="[Release] Land PR #22", assignee="default", tenant="weroll-app",
+                  project="p_weroll_app",
+                  body="operator-hold: manual\n\nland-serialisation: waived stacked PRs 21+22\nMerge it.")
+    assert ok is None
+    ok = _p7_hook(title="[Release] Land PR #9", assignee="default", tenant="backupbrain",
+                  body="operator-hold: manual\n\nMerge it.")
+    assert ok is None, "a BackupBrain land card is not serialised behind a WeRoll one"
+
+
+def test_f_the_db_is_read_read_only_and_a_missing_db_fails_open(fleet, monkeypatch):
+    _p7_running_land(fleet)
+    args = {"title": "[Release] Land PR #22", "tenant": "weroll-app", "body": "operator-hold: manual"}
+    assert mg.land_card_conflict(args) is not None
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(fleet / "nope.db"))
+    assert mg.land_card_conflict(args) is None
+    # a reader that raises is a pass, never a refusal
+    def boom(t, b):
+        raise RuntimeError("db locked")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(fleet / "kanban.db"))
+    assert mg.land_card_conflict(args, board_reader=boom) is None
+
+
+def test_f_control_the_serialisation_rule_is_not_vacuous(fleet):
+    args = {"title": "[Release] Land PR #22", "tenant": "weroll-app", "body": "operator-hold: manual"}
+    assert mg.land_card_conflict(args, board_reader=lambda t, b: []) is None
+    assert mg.land_card_conflict(args, board_reader=lambda t, b: [("t_z", "[Release] Land PR #1")]) is not None
+
+
+# (g) a broken tenants file fails open
+def test_g_a_broken_tenants_file_fails_open(fleet):
+    (fleet / "kanban-tenants.json").write_text("{not json")
+    out = _p7_hook(title="[WeRoll] Build it", assignee="bob", tenant="weroll-app",
+                   workspace_kind="worktree", body="x")
+    # nothing refuses; the only thing left standing is the trunk default
+    assert out is None or out["action"] == "modify"
+    assert mg.tenant_project_conflict({"title": "[WeRoll] Build it", "tenant": "weroll-app",
+                                       "workspace_kind": "worktree"}) is None
+    (fleet / "kanban-tenants.json").unlink()
+    assert mg.tenant_project_conflict({"title": "[WeRoll] Build it", "tenant": "weroll-app",
+                                       "workspace_kind": "worktree"}) is None
+
+
+def test_g_garbage_args_fail_open(fleet):
+    for bad in (None, {}, {"title": None, "body": b"\xff", "workspace_kind": "worktree", "tenant": 3}):
+        assert mg.tenant_project_conflict(bad) is None
+        assert mg.land_card_conflict(bad) is None
+        assert mg.branch_target_injection(bad) is None

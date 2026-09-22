@@ -1,4 +1,4 @@
-"""Worktree carry-over on retry, on upstream's ``kanban_task_claimed`` hook.
+"""Worktree carry-over on retry + base-current at claim, on upstream's ``kanban_task_claimed`` hook.
 
 See ``plugin.yaml`` for the defect this closes and why it is a plugin rather
 than a kanban-core patch.
@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-__all__ = ["register", "on_task_claimed", "carry_over", "plan"]
+__all__ = ["register", "on_task_claimed", "carry_over", "plan", "base_current"]
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +474,249 @@ def carry_over(task_id: str, board: Optional[str] = None, *, db_path: Optional[P
 
 
 # --------------------------------------------------------------------------
+# base-current at claim time (1.2.0)
+# --------------------------------------------------------------------------
+#
+# ``kanban_db_workspace._ensure_git_worktree`` cuts a NEW branch with
+# ``git worktree add -b <branch> <target> HEAD`` — from the primary clone's
+# HEAD, unfetched. Whatever branch the live clone is parked on becomes the base
+# of every new card, and any agent that runs ``git checkout`` there re-bases all
+# later cards. When the branch already EXISTS locally the kernel reuses it
+# (``worktree add <target> <branch>``). So the narrowest fix that needs no
+# kernel change is to make the branch exist, pointed at the local
+# remote-tracking trunk ref, before the kernel looks. No fetch (dispatch lock),
+# no checkout, HEAD/index/worktrees untouched. The cron script
+# ``~/.hermes/scripts/base-current-watch.py`` keeps ``refs/remotes/origin/*``
+# fresh; this phase only WARNS when it looks stale.
+
+#: Env kill switch for the base-current phase alone.
+ENV_BASE_CURRENT = "HERMES_KANBAN_BASE_CURRENT"
+
+#: Age (minutes) of ``.git/FETCH_HEAD`` past which the repo is called stale.
+ENV_BASE_CURRENT_MAX_AGE = "HERMES_BASE_CURRENT_MAX_AGE_MIN"
+DEFAULT_BASE_CURRENT_MAX_AGE_MIN = 30
+
+#: Env override for the fleet tenant map (tests); default ``<kanban home>/kanban-tenants.json``.
+ENV_TENANTS_PATH = "HERMES_KANBAN_TENANTS"
+
+_TRUNK_REF_PREFIXES = ("refs/remotes/origin/", "origin/", "refs/heads/")
+
+
+def _tenants_path(env: Optional[Mapping[str, str]] = None) -> Path:
+    env = os.environ if env is None else env
+    override = (env.get(ENV_TENANTS_PATH) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _kanban_home() / "kanban-tenants.json"
+
+
+def _load_tenants(path: Path) -> Dict[str, Dict[str, Any]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if isinstance(v, dict) and not k.startswith("_")}
+
+
+def _realpath(path: Path) -> str:
+    try:
+        return os.path.realpath(str(Path(path).expanduser()))
+    except OSError:
+        return str(path)
+
+
+def _tenant_for_repo(repo: Path, tenants: Mapping[str, Dict[str, Any]]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """The tenant whose ``primary_path`` IS ``repo`` (realpath both). None when none."""
+    want = _realpath(repo)
+    for slug, tenant in tenants.items():
+        primary = tenant.get("primary_path")
+        if isinstance(primary, str) and primary.strip() and _realpath(Path(primary)) == want:
+            return slug, tenant
+    return None
+
+
+def _strip_trunk_prefix(name: str) -> str:
+    name = name.strip()
+    for prefix in _TRUNK_REF_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def _resolve_trunk(repo: Path, tenant: Optional[Mapping[str, Any]]) -> Tuple[str, str]:
+    """``(trunk, how)`` — tenant ``trunk`` key, else ``refs/remotes/origin/HEAD``'s
+    target, else ``main``. The trunk is a bare branch name (``main``)."""
+    if tenant is not None:
+        trunk = tenant.get("trunk")
+        if isinstance(trunk, str) and trunk.strip():
+            return _strip_trunk_prefix(trunk), "tenant"
+    head = _git_out(repo, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    if head and head.startswith("refs/remotes/origin/"):
+        return _strip_trunk_prefix(head), "origin/HEAD"
+    return "main", "default"
+
+
+def _git_common_dir(repo: Path) -> Optional[Path]:
+    out = _git_out(repo, "rev-parse", "--git-common-dir")
+    if not out:
+        return None
+    common = Path(out)
+    return common if common.is_absolute() else (repo / common)
+
+
+def _fetch_head_age_min(repo: Path) -> Optional[float]:
+    """Minutes since ``FETCH_HEAD`` was written; None when never fetched / unreadable."""
+    common = _git_common_dir(repo)
+    if common is None:
+        return None
+    try:
+        import time as _time
+        mtime = (common / "FETCH_HEAD").stat().st_mtime
+    except OSError:
+        return None
+    return max(0.0, (_time.time() - mtime) / 60.0)
+
+
+def _max_age_min(env: Mapping[str, str]) -> float:
+    raw = (env.get(ENV_BASE_CURRENT_MAX_AGE) or "").strip()
+    try:
+        value = float(raw) if raw else float(DEFAULT_BASE_CURRENT_MAX_AGE_MIN)
+    except ValueError:
+        value = float(DEFAULT_BASE_CURRENT_MAX_AGE_MIN)
+    return value
+
+
+def _warn_if_stale(repo: Path, env: Mapping[str, str]) -> Optional[float]:
+    age = _fetch_head_age_min(repo)
+    limit = _max_age_min(env)
+    if age is None:
+        logger.warning(
+            "kanban-worktree-carryover[base-current]: %s has no FETCH_HEAD — it has never been "
+            "fetched here; refs/remotes/origin/* may be stale (base-current-watch.py keeps it fresh).",
+            repo,
+        )
+    elif age > limit:
+        logger.warning(
+            "kanban-worktree-carryover[base-current]: %s last fetched %.0f min ago (limit %.0f); "
+            "new branches are cut from a possibly stale refs/remotes/origin trunk "
+            "(is the base-current-watch cron job enabled?).",
+            repo, age, limit,
+        )
+    return age
+
+
+def base_current(task_id: str, board: Optional[str] = None, *, db_path: Optional[Path] = None,
+                 env: Optional[Mapping[str, str]] = None,
+                 tenants_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Make the card's branch exist at the local remote-tracking trunk ref BEFORE
+    the kernel cuts it from HEAD. Never raises; only ever CREATES a local ref."""
+    env = os.environ if env is None else env
+    verdict: Dict[str, Any] = {
+        "action": "noop", "reason": "", "branch": None, "target_repo": None,
+        "trunk": None, "trunk_source": None, "base": None, "tenant": None,
+        "fetch_head_age_min": None,
+    }
+    try:
+        switch = str(env.get(ENV_BASE_CURRENT, "1")).strip().lower()
+        if switch in ("0", "false", "no", "off"):
+            verdict["reason"] = "disabled by env"
+            return verdict
+        if not task_id:
+            verdict["reason"] = "no task id"
+            return verdict
+
+        db = Path(db_path) if db_path is not None else _find_db(task_id, board)
+        if db is None:
+            verdict["reason"] = "no board db holds this task"
+            return verdict
+        task = (_load_board(db, task_id, board) or {}).get("task")
+        if not task:
+            verdict["reason"] = "task row unreadable"
+            return verdict
+        if (task.get("workspace_kind") or "") != "worktree":
+            verdict["reason"] = "not a worktree card"
+            return verdict
+
+        branch = (task.get("branch_name") or "").strip()
+        if not branch:
+            # The kernel would default to wt/<id>; that is its business, not ours.
+            verdict["reason"] = "card has no branch_name"
+            return verdict
+        verdict["branch"] = branch
+
+        ws_path = (task.get("workspace_path") or "").strip()
+        anchor = ws_path or (_board_default_workdir(board) or "")
+        if not anchor:
+            verdict["reason"] = "no anchor (no workspace_path, no board default_workdir)"
+            return verdict
+        target_repo = _repo_root_for(Path(anchor))
+        if target_repo is None:
+            verdict["reason"] = "anchor is not inside a git repo"
+            return verdict
+        verdict["target_repo"] = str(target_repo)
+
+        verdict["fetch_head_age_min"] = _warn_if_stale(target_repo, env)
+
+        if _branch_exists(target_repo, branch):
+            # A retry keeps its commits; the cross-clone case was carry-over's.
+            verdict["reason"] = "branch already present in target repo"
+            return verdict
+
+        tenants = _load_tenants(Path(tenants_path) if tenants_path is not None else _tenants_path(env))
+        found = _tenant_for_repo(target_repo, tenants)
+        tenant = found[1] if found else None
+        verdict["tenant"] = found[0] if found else None
+        trunk, how = _resolve_trunk(target_repo, tenant)
+        verdict["trunk"], verdict["trunk_source"] = trunk, how
+
+        tracking = f"refs/remotes/origin/{trunk}"
+        base = _git_out(target_repo, "rev-parse", "--verify", "-q", tracking)
+        if not base:
+            verdict["reason"] = f"{tracking} does not exist in target repo"
+            logger.warning(
+                "kanban-worktree-carryover[base-current]: task %s — %s has no %s; leaving the "
+                "kernel to cut %r from HEAD (unfetched clone or wrong trunk?).",
+                task_id, target_repo, tracking, branch,
+            )
+            return verdict
+        verdict["base"] = base
+
+        made = _git(target_repo, "branch", "--no-track", branch, tracking)
+        if made is None or made.returncode != 0 or not _branch_exists(target_repo, branch):
+            verdict["reason"] = "git branch failed"
+            logger.warning(
+                "kanban-worktree-carryover[base-current]: task %s — could not create %r at %s in %s: %s",
+                task_id, branch, tracking, target_repo,
+                ((made.stderr or made.stdout or "").strip()[:400] if made else "no result"),
+            )
+            return verdict
+
+        verdict["action"] = "based"
+        verdict["reason"] = f"branch created at {tracking}"
+        logger.info(
+            "kanban-worktree-carryover[base-current]: task %s — created %r at %s (%s, trunk via %s) "
+            "in %s so the worktree is cut from the fetched trunk, not the clone's parked HEAD.",
+            task_id, branch, tracking, base[:12], how, target_repo,
+        )
+        _append_event(db, task_id, "base_current", {
+            "branch": branch,
+            "target_repo": str(target_repo),
+            "trunk": trunk,
+            "trunk_source": how,
+            "base": base,
+            "tenant": verdict["tenant"],
+        })
+        return verdict
+    except Exception:  # noqa: BLE001 — fail open
+        logger.debug("kanban-worktree-carryover[base-current]: unexpected error", exc_info=True)
+        verdict["action"] = "noop"
+        verdict["reason"] = verdict.get("reason") or "unexpected error"
+        return verdict
+
+
+# --------------------------------------------------------------------------
 # hook
 # --------------------------------------------------------------------------
 
@@ -484,6 +727,13 @@ def on_task_claimed(task_id: Optional[str] = None, board: Optional[str] = None, 
             carry_over(str(task_id), board)
     except Exception:  # noqa: BLE001 — a hook must never break a claim
         logger.exception("kanban-worktree-carryover: unexpected error; claim left untouched")
+    # Base-current runs AFTER carry-over on EVERY claim (first run included):
+    # carry-over may have just created the branch, in which case this is a noop.
+    try:
+        if task_id:
+            base_current(str(task_id), board)
+    except Exception:  # noqa: BLE001
+        logger.exception("kanban-worktree-carryover[base-current]: unexpected error; claim left untouched")
 
 
 def register(ctx) -> None:

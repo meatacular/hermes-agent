@@ -1,5 +1,5 @@
 name: kanban-worktree-carryover
-version: 1.1.0
+version: 1.2.0
 kind: backend
 author: Agent Smith (WeRoll fleet), 2026-09-14
 description: >-
@@ -62,5 +62,27 @@ description: >-
       still comes from the card's `workspace_path` or the board `default_workdir`.
 
   Kill switch: HERMES_KANBAN_WORKTREE_CARRYOVER=0 disables it without a revert.
+
+  1.2.0 (P1-base-current, 2026-09-23) — a second, independent phase on the same
+  hook, run AFTER carry-over on EVERY claim of a worktree card (first run
+  included). `kanban_db_workspace._ensure_git_worktree` cuts a NEW branch with
+  `git worktree add -b <branch> <target> HEAD`: the primary clone's parked,
+  unfetched HEAD became the base of every new card, and any agent that ran
+  `git checkout` in the clone re-based all later cards. The kernel reuses a
+  branch that already EXISTS, so this phase makes it exist first:
+    * card `branch_name` set and ABSENT in the target repo -> `git branch
+      --no-track <branch> refs/remotes/origin/<trunk>` (a plain local ref;
+      no fetch, no checkout, HEAD/index/worktrees untouched);
+    * branch present -> nothing (a retry keeps its commits);
+    * `refs/remotes/origin/<trunk>` missing -> nothing, one WARNING;
+    * trunk = tenant `trunk` key in kanban-tenants.json (tenant found by
+      realpath-matching `primary_path` to the target repo), else the target
+      of `refs/remotes/origin/HEAD`, else `main`;
+    * staleness signal only: if `.git/FETCH_HEAD` is older than
+      HERMES_BASE_CURRENT_MAX_AGE_MIN (default 30) it logs a WARNING naming
+      the repo — `~/.hermes/scripts/base-current-watch.py` (cron, 5 min)
+      does the fetching, never this hook (dispatch lock);
+    * records a `base_current` task_events row, like carry-over's.
+  Kill switch: HERMES_KANBAN_BASE_CURRENT=0 (independent of the carry-over one).
 provides_hooks:
   - kanban_task_claimed

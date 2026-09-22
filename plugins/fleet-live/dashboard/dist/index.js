@@ -4,7 +4,8 @@
  * Two tabs. **Live** is one pane per active agent, each streaming that agent's chain of thought
  * as it is written, with the card's lane timeline, its hard dependencies and the actions you
  * would otherwise open the board to take. **Up next** is the queue behind them, ordered by what
- * the dispatcher can actually reach.
+ * the dispatcher can actually reach. **Decisions** is everything waiting on a person, from every
+ * board, in plain words and in the order to do it — one land per repo at a time.
  *
  * Three rules shape the streaming half:
  *   1. Nothing loads until the tab is open. The socket opens on mount and closes on unmount, so
@@ -93,9 +94,14 @@
       body: JSON.stringify(body)
     });
   }
-  function patchTask(taskId, body) { return jsonReq(KANBAN + "/tasks/" + encodeURIComponent(taskId), "PATCH", body); }
-  function commentTask(taskId, text) {
-    return jsonReq(KANBAN + "/tasks/" + encodeURIComponent(taskId) + "/comments", "POST",
+  // A card on a named board (`kanban/boards/<slug>/`) is addressed with `?board=`; the default
+  // board is the kanban API's own default, so nothing is appended for it.
+  function boardQ(board) { return board && board !== "default" ? "?board=" + encodeURIComponent(board) : ""; }
+  function patchTask(taskId, body, board) {
+    return jsonReq(KANBAN + "/tasks/" + encodeURIComponent(taskId) + boardQ(board), "PATCH", body);
+  }
+  function commentTask(taskId, text, board) {
+    return jsonReq(KANBAN + "/tasks/" + encodeURIComponent(taskId) + "/comments" + boardQ(board), "POST",
       { body: text, author: "dashboard" });
   }
   function tidyError(err) {
@@ -399,7 +405,7 @@
 
     function run(label, body) {
       setBusy(label);
-      patchTask(task.id, body)
+      patchTask(task.id, body, task.board)
         .then(function () { onDone(null, label + " ✓"); })
         .catch(function (err) { onDone(tidyError(err), null); })
         .then(function () { setBusy(""); }, function () { setBusy(""); });
@@ -443,7 +449,7 @@
       var body = text.trim();
       if (!body || busy) return;
       setBusy(true);
-      commentTask(props.taskId, body)
+      commentTask(props.taskId, body, props.board)
         .then(function () { setText(""); props.onDone(null, "comment added ✓"); })
         .catch(function (err) { props.onDone(tidyError(err), null); })
         .then(function () { setBusy(false); }, function () { setBusy(false); });
@@ -463,6 +469,7 @@
   // ── the card modal ────────────────────────────────────────────────────────────────────────
   function CardModal(props) {
     var taskId = props.taskId;
+    var board = props.board || null;
     var onClose = props.onClose;
     var onOpen = props.onOpen;
     var onBack = props.onBack;
@@ -482,11 +489,11 @@
       var cancelled = false;
       setCard(null);
       setErr("");
-      SDK.fetchJSON(API + "/cards/" + encodeURIComponent(taskId))
+      SDK.fetchJSON(API + "/cards/" + encodeURIComponent(taskId) + boardQ(board))
         .then(function (r) { if (!cancelled) setCard(r.card); })
         .catch(function (e) { if (!cancelled) setErr(tidyError(e)); });
       return function () { cancelled = true; };
-    }, [taskId, nonce, setCard, setErr]);
+    }, [taskId, board, nonce, setCard, setErr]);
 
     useEffect(function () {
       function onKey(e) { if (e.key === "Escape") onClose(); }
@@ -518,7 +525,7 @@
             card.branch_name ? h("span", { className: "fl-chip" }, card.branch_name) : null,
             h("span", { className: "fl-chip" }, "created " + since(card.created_at))),
           h(Timeline, { timeline: card.timeline }),
-          h(Deps, { deps: card.deps, onOpen: onOpen }),
+          h(Deps, { deps: card.deps, onOpen: function (id) { onOpen(id, card.board); } }),
           h(Actions, { task: card, onDone: after, onComment: function () {
             var el = document.querySelector(".fl-modal .fl-composer textarea");
             if (el) { el.focus(); el.scrollIntoView({ block: "center" }); }
@@ -545,7 +552,7 @@
                 }))
             : null,
           h("h3", { className: "fl-modal-h" }, "add a comment"),
-          h(Composer, { taskId: card.id, onDone: after, autoFocus: false })) : null));
+          h(Composer, { taskId: card.id, board: card.board, onDone: after, autoFocus: false })) : null));
   }
 
   // ── event rendering ───────────────────────────────────────────────────────────────────────
@@ -924,6 +931,111 @@
       }));
   }
 
+  // ── Decisions ─────────────────────────────────────────────────────────────────────────────
+  // What is waiting on a person, in the order to do it. The server has already ranked the
+  // entries (one land per repo at a time; questions that block running work first; unmet
+  // parents last), so this component only renders — the ordering rule lives in one place.
+  var KIND_WORD = { release: "release", question: "question", capability: "needs a hand",
+                    hold: "held", wait: "waiting", pr: "open PR" };
+
+  function prTone(state) {
+    if (state === "CLEAN") return "is-ok";
+    if (state === "unavailable" || state === "none" || !state) return "";
+    return "is-warn";
+  }
+  function prLabel(e) {
+    if (e.pr === null || e.pr === undefined) return null;
+    if (e.pr_state === "unavailable") return "PR #" + e.pr + " · state unavailable";
+    if (e.pr_state === "none") return "PR #" + e.pr;
+    if (e.pr_state === "not-open") return "PR #" + e.pr + " · not open";
+    return "PR #" + e.pr + " · " + e.pr_state + (e.pr_base ? " → " + e.pr_base : "");
+  }
+
+  function DecisionRow(props) {
+    var e = props.entry;
+    var onOpenCard = props.onOpenCard;
+    var notify = props.notify;
+    var reload = props.reload;
+    var isNext = props.isNext;
+    var pr = prLabel(e);
+    return h("li", { className: cls("fl-drow", "fl-drow--" + e.kind, isNext && "is-next", e.wait_text && "has-wait") },
+      h("div", { className: "fl-dnum" }, String(e.order)),
+      h("div", { className: "fl-dmain" },
+        h("button", { className: "fl-dwhat", onClick: function () { onOpenCard(e.id, e.board); },
+                      title: "open this card" }, e.what),
+        h("div", { className: "fl-qmeta" },
+          h("span", { className: "fl-chip fl-chip--kind" }, KIND_WORD[e.kind] || e.kind),
+          h(StatusBadge, { status: e.status }),
+          pr ? h("span", { className: cls("fl-chip", "fl-chip--pr", prTone(e.pr_state)), title: e.pr_title || "" }, pr) : null,
+          e.assignee ? h("span", { className: "fl-chip fl-chip--agent" }, "@" + e.assignee) : null,
+          e.board && e.board !== "default" ? h("span", { className: "fl-chip" }, "board: " + e.board) : null,
+          e.hold_condition
+            ? h("span", { className: cls("fl-chip", e.hold_condition.state === "satisfied" ? "is-ok" : "is-warn") },
+                "condition " + e.hold_condition.state + ": " + e.hold_condition.condition)
+            : null,
+          h("span", { className: "fl-chip fl-chip--id" }, e.id)),
+        e.wait_text ? h("div", { className: "fl-dwait" }, e.wait_text) : null,
+        h("dl", { className: "fl-dl" },
+          h("dt", null, "Why now"), h("dd", null, e.impact),
+          h("dt", null, "If you do nothing"), h("dd", null, e.if_not),
+          h("dt", null, "How"), h("dd", null, e.how)),
+        e.parents_unmet && e.parents_unmet.length
+          ? h("div", { className: "fl-deprow" },
+              h("span", { className: "fl-deplabel is-blocking" }, "waiting on " + e.parents_unmet.length),
+              e.parents_unmet.map(function (p) {
+                return h("button", { key: p.id, className: "fl-dep is-open", title: p.title + " · " + p.status,
+                                     onClick: function () { onOpenCard(p.id, e.board); } },
+                  h("span", { className: "fl-dep-dot" }), p.title);
+              }))
+          : null,
+        h("div", { className: "fl-drow-foot" },
+          h(Actions, {
+            task: e,
+            onDone: function (err, ok) { notify(err, ok); reload(); },
+            onComment: function () { onOpenCard(e.id, e.board); }
+          }),
+          h("button", { className: "fl-act", onClick: function () { onOpenCard(e.id, e.board); },
+                        title: "open the full card: brief, attempts, comments" }, "open card"))));
+  }
+
+  function Decisions(props) {
+    var data = props.data;
+    var onOpenCard = props.onOpenCard;
+    var notify = props.notify;
+    var reload = props.reload;
+    if (data === null) return h("div", { className: "fl-blank" }, "reading every board…");
+    if (data === false) return h("div", { className: "fl-blank" }, "Could not read the boards. Retrying every 30 s.");
+    var groups = data.groups || [];
+    if (!groups.length) return h("div", { className: "fl-blank" }, "Nothing is waiting on you.");
+    var next = data.next;
+    return h("div", { className: "fl-decisions" },
+      next
+        ? h("div", { className: "fl-donext" },
+            h("span", { className: "fl-donext-label" }, "Do this next"),
+            h("button", { className: "fl-donext-what", onClick: function () { onOpenCard(next.id, next.board); } }, next.what),
+            h("span", { className: "fl-donext-how" }, next.how))
+        : h("div", { className: "fl-donext is-quiet" },
+            h("span", { className: "fl-donext-label" }, "Nothing to click right now"),
+            h("span", { className: "fl-donext-how" }, "Everything below is waiting on a parent or a condition, not on you.")),
+      h("div", { className: "fl-queue-note" },
+        data.count + (data.count === 1 ? " decision" : " decisions") + " across " +
+        (data.boards || []).length + (data.boards && data.boards.length === 1 ? " board" : " boards") +
+        " · one land per repo at a time; a release ranked after the first waits for it, then gets re-checked" +
+        " · refreshed " + since(data.at)),
+      groups.map(function (g) {
+        return h("section", { key: g.group, className: "fl-dgroup" },
+          h("h2", { className: "fl-dgroup-h" },
+            g.repo || g.tenant || "general",
+            g.repo && !g.pr_state_available
+              ? h("span", { className: "fl-chip is-warn", title: "gh did not answer; PR states are not verified" }, "PR state unavailable")
+              : null),
+          h("ol", { className: "fl-dlist" }, g.entries.map(function (e) {
+            return h(DecisionRow, { key: e.board + ":" + e.id, entry: e, onOpenCard: onOpenCard, notify: notify,
+                                    reload: reload, isNext: !!(next && next.id === e.id && next.board === e.board) });
+          })));
+      }));
+  }
+
   // ── the page ──────────────────────────────────────────────────────────────────────────────
   function Page() {
     var store = useMemo(createStore, []);
@@ -947,6 +1059,24 @@
     var toastState = useState(null);
     var toast = toastState[0];
     var setToast = toastState[1];
+    var decState = useState(null);           // null = not read yet, false = failed, else the payload
+    var decisions = decState[0];
+    var setDecisions = decState[1];
+    var decNonceState = useState(0);
+    var decNonce = decNonceState[0];
+    var bumpDecisions = decNonceState[1];
+
+    // Polled from the page, not the tab, so the count badge is right before the tab is opened.
+    // Every 30 s: the server caches PR state for 60 s, so this never hammers gh.
+    useEffect(function () {
+      var cancelled = false;
+      SDK.fetchJSON(API + "/decisions")
+        .then(function (r) { if (!cancelled) setDecisions(r); })
+        .catch(function () { if (!cancelled) setDecisions(function (d) { return d || false; }); });
+      var t = window.setInterval(function () { bumpDecisions(function (n) { return n + 1; }); }, 30000);
+      return function () { cancelled = true; window.clearInterval(t); };
+    }, [decNonce, setDecisions, bumpDecisions]);
+    var reloadDecisions = useCallback(function () { bumpDecisions(function (n) { return n + 1; }); }, [bumpDecisions]);
 
     var onPanes = useCallback(function (list) { setPanes(list); setSeen(true); }, [setPanes, setSeen]);
     var streamPair = useStream(store, onPanes);
@@ -964,8 +1094,8 @@
       return function () { window.clearTimeout(t); };
     }, [toast, setToast]);
 
-    var openCard = useCallback(function (id) {
-      setStack(function (s) { return s.concat([id]); });
+    var openCard = useCallback(function (id, board) {
+      setStack(function (s) { return s.concat([{ id: id, board: board || null }]); });
     }, [setStack]);
     var closeCard = useCallback(function () { setStack([]); }, [setStack]);
     var backCard = useCallback(function () { setStack(function (s) { return s.slice(0, -1); }); }, [setStack]);
@@ -1014,13 +1144,22 @@
                       onClick: function () { setView("live"); } },
           "Live", h("span", { className: "fl-count" }, visible.length)),
         h("button", { className: cls("fl-viewtab", view === "next" && "is-active"),
-                      onClick: function () { setView("next"); } }, "Up next")),
+                      onClick: function () { setView("next"); } }, "Up next"),
+        h("button", { className: cls("fl-viewtab", view === "decisions" && "is-active"),
+                      onClick: function () { setView("decisions"); } },
+          "Decisions",
+          decisions && decisions.count
+            ? h("span", { className: "fl-count fl-count--hot" }, decisions.count) : null)),
 
       h("div", { className: "fl-viewnote" }, view === "live"
         ? "Thoughts appear as they are written. Scroll back in any pane and it holds your place until you return to the tail."
-        : "Everything the dispatcher has not started yet."),
+        : view === "next"
+          ? "Everything the dispatcher has not started yet."
+          : "Everything waiting on you, from every board, in the order to do it. Top to bottom is safe; the numbers are the order."),
 
-      view === "next"
+      view === "decisions"
+        ? h(Decisions, { data: decisions, onOpenCard: openCard, notify: notify, reload: reloadDecisions })
+        : view === "next"
         ? h(UpNext, { onOpenCard: openCard, notify: notify })
         : !visible.length
           ? h("div", { className: "fl-blank" }, seen
@@ -1036,7 +1175,8 @@
 
       stack.length
         ? h(CardModal, {
-            taskId: stack[stack.length - 1], onClose: closeCard, onBack: backCard,
+            taskId: stack[stack.length - 1].id, board: stack[stack.length - 1].board,
+            onClose: closeCard, onBack: backCard,
             canBack: stack.length > 1, onOpen: openCard, notify: notify
           })
         : null,

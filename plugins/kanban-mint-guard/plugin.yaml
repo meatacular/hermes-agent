@@ -1,6 +1,8 @@
 name: kanban-mint-guard
-version: 0.1.0
+version: 0.2.0
 kind: backend
+provides_hooks:
+  - pre_tool_call
 author: Claude (Cowork) for Richie, 2026-09-12
 description: >-
   Mint-time assignee routing guard, as a PLUGIN rather than a core patch.
@@ -83,6 +85,44 @@ description: >-
   will itself create; the remedy is one line of body text and the message says which. Like
   the kernel rule, the prose it cannot classify stays a documented gap — the
   `kanban-worktree-provisioning` skill still carries the manual check.
+
+  A seventh rule (2026-09-23, p1-20260923 / P2-mint-contract, version 0.2.0) is the
+  MINT-TIME TENANT / PROJECT / BASE CONTRACT. The defect is in the frozen kernel and is
+  read-only evidence: `hermes_cli/kanban_db.py` fills `project_id` from the BOARD's
+  default first (:1357-1361) and consults the tenant map only when
+  `project_obj is None and workspace_kind == "scratch"` (:1402-1404), so an explicit
+  `tenant` NEVER binds the project. A `[WeRoll]` card minted on the default board (whose
+  board.json project_id is p_3d4a6fe1 = BackupBrain) with `tenant="weroll-app"` and no
+  `project` therefore binds BackupBrain and gets a `backupbrain/t_…` branch in the
+  weroll-app repo. Three cards have hit this; the last is t_32e1fb81 (2026-09-22 21:35).
+  Replayed over the board: 10 worktree rows carry tenant=weroll-app with
+  project_id=p_3d4a6fe1. The kanban-mint skill already says "always pass both tenant AND
+  project"; an instruction is not enforcement.
+
+    7a. a worktree card (workspace_kind='worktree', or a shape the kernel UPGRADES to one:
+        no workspace_kind plus an explicit `tenant`, a `project`, or a `worktree:`/`repo:`/
+        `workspace:` body line) whose REPO tenant — from the `tenant` arg, else the title's
+        business tag, else `workspace_path`, else the body's repo line, else the board's
+        default_workdir — differs from the tenant of the project the kernel WOULD bind (the
+        explicit `project`, else the board's project_id) is refused. The message names the
+        exact fix: `project="p_weroll_app"` with `tenant="weroll-app"`, or `--board weroll`
+        when a board bound to that project exists. Tenants gating one GitHub repo
+        (`backupbrain` / `backupbrain-legacy`) are one tenant, so the default board's legacy
+        default_workdir cannot refuse a BackupBrain card.
+    7b. a BUILD-lane worktree card without a `branch-target: <trunk>` line (the
+        kanban-mint skill's spelling) has one INJECTED — `{"action": "modify"}`, the same
+        mechanism hold-marker-guard uses — never refused. Trunk = the tenant's `trunk` key,
+        else `main`. A present line, in any markup, is left alone.
+    7c. a LAND card (`[Release] Land PR #<n>`) must open with `operator-hold: manual` or
+        carry a `hold: <condition>` line, and only one land card per tenant may be
+        `running` at once (the board db read via a stdlib read-only sqlite URI, bounded,
+        fail-open). Escape hatch: `land-serialisation: waived <reason>` in the body.
+
+  No overlap with kanban-project-link-guard, which refuses only an EXPLICIT `project` that
+  resolves nowhere: rule 7 reads a project that DOES resolve and asks whether it is the
+  right one. Rule 7 also honours the call's own `board` arg when reading board.json, as the
+  kernel does. A missing or broken kanban-tenants.json, a project known only to a
+  projects.db, a repo that belongs to no tenant, or any exception -> the card is created.
 
   Fail-open by construction. No title, no assignee, an unknown name, a body it
   cannot read, or any exception at all -> the card is created. A guard that guesses
