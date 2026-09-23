@@ -342,3 +342,16 @@ def test_awareness_line_fires_for_a_notification_shaped_turn(monkeypatch, tmp_pa
     assert mod.awareness_note("✔ [default] @bob Kanban t_dupcrd done — merged") is None
     assert mod.awareness_note("no kanban notification here") is None
     assert mod.awareness_note("x" * 1001 + " Kanban t_dupcrd blocked") is None
+
+
+def test_first_transient_block_does_not_spawn_overwatch():
+    """boardfix-20260923: block_recurrences is 1 on the FIRST block of a kind."""
+    mod = _load() if "_load" in globals() else None
+    import importlib.util, pathlib
+    if mod is None:
+        p = pathlib.Path(__file__).resolve().parents[2] / "plugins" / "kanban-block-escalator" / "__init__.py"
+        spec = importlib.util.spec_from_file_location("kbe_probe", p); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    assert mod.should_trigger({"block_kind": "transient", "block_recurrences": 1})[0] is False
+    assert mod.should_trigger({"block_kind": "transient", "block_recurrences": 2})[0] is True
+    assert mod.should_trigger({"block_kind": "", "block_recurrences": 1})[0] is False
+    assert mod.should_trigger({"block_kind": "capability", "block_recurrences": 1})[0] is True

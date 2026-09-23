@@ -789,3 +789,17 @@ def test_a_recorded_previous_workspace_path_is_used_as_a_source(incident, key):
     incident.provision()
     assert (incident.target_ws / "digest.py").exists()
     assert "feat: add weekly retrospective digest" in incident.log_subjects(incident.target_ws)
+
+
+def test_find_db_falls_back_to_named_boards_when_hook_board_is_default(tmp_path, monkeypatch):
+    """boardfix-20260923: the claim hook passes board='default' for cards on other boards."""
+    import sqlite3
+    home = tmp_path / "hermes"; bdir = home / "kanban" / "boards" / "weroll"; bdir.mkdir(parents=True)
+    (home / "kanban.db").write_bytes(b"")                      # default board: no such task
+    db = bdir / "kanban.db"
+    con = sqlite3.connect(db); con.execute("CREATE TABLE tasks (id TEXT)"); con.execute("INSERT INTO tasks VALUES ('t_w')"); con.commit(); con.close()
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    m = _load_plugin()
+    assert m._find_db("t_w", "default") == db
+    assert m._find_db("t_missing", "default") is None

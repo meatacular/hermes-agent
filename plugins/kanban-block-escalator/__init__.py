@@ -74,7 +74,10 @@ NEVER_TRIGGER_KINDS = frozenset({"operator_hold", "dependency", "scheduled",
 # Reporting is unaffected: escalation-watch and stalled-card-watch still surface these
 # to Richie. What stops is spending a supervisor session on them.
 # Revert: restore ALWAYS/NEVER above from __init__.py.bak-freeze-20260918.
-TRANSIENT_TRIGGER_AFTER = 1     # first transient retries; second triggers
+TRANSIENT_TRIGGER_AFTER = 2     # first transient retries; second triggers
+# 2026-09-23 (boardfix-20260923): was 1. The kernel sets block_recurrences to 1 on the FIRST
+# block of a kind (_route_block), so `rec >= 1` fired overwatch on the first transient — it did on
+# t_6edbcea1, and that session closed PR #25 and committed on the primary clone's main.
 
 OVERWATCH_LIMIT = 2             # overwatch touches per card before Richie
 OVERWATCH_MARKER = "overwatch:"  # Smith's decision comment must start with this
@@ -339,7 +342,7 @@ def should_trigger(card: dict) -> tuple[bool, str]:
     if kind == "transient":
         return (rec >= TRANSIENT_TRIGGER_AFTER), f"transient recurrence {rec}"
     # Unkinded / unknown kinds: a block is a block — but only once it repeats.
-    return (rec >= 1), f"{kind or 'unkinded'} recurrence {rec}"
+    return (rec >= 2), f"{kind or 'unkinded'} recurrence {rec}"
 
 
 def is_hard_stop(task_id: str, card: dict) -> tuple[bool, str]:

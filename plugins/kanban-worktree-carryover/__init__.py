@@ -144,6 +144,26 @@ def _find_db(task_id: str, board: Optional[str]) -> Optional[Path]:
                 return path
         except Exception:
             continue
+    # 2026-09-23 (boardfix-20260923): the claim hook fires with board=get_current_board(), which
+    # is "default" while the gateway dispatcher ticks ANY board (it passes board= to dispatch_once
+    # but never scopes the current board). So a card on kanban/boards/<slug>/ was never found and
+    # base-current silently no-op'd: t_6edbcea1 (weroll) was cut from the clone's parked 3e49fcf.
+    # Fall back to every board DB.
+    boards = _kanban_home() / "kanban" / "boards"
+    try:
+        extra = sorted(boards.glob("*/kanban.db"))
+    except OSError:
+        extra = []
+    for path in extra:
+        try:
+            if not path.is_file() or path.stat().st_size == 0:
+                continue
+            with _connect(path) as conn:
+                row = conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row:
+                return path
+        except Exception:
+            continue
     return None
 
 
@@ -630,6 +650,8 @@ def base_current(task_id: str, board: Optional[str] = None, *, db_path: Optional
         db = Path(db_path) if db_path is not None else _find_db(task_id, board)
         if db is None:
             verdict["reason"] = "no board db holds this task"
+            logger.warning("kanban-worktree-carryover[base-current]: task %s found in no board db "
+                           "(board=%r); the kernel will cut its branch from HEAD", task_id, board)
             return verdict
         task = (_load_board(db, task_id, board) or {}).get("task")
         if not task:
