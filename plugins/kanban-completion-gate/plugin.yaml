@@ -1,5 +1,5 @@
 name: kanban-completion-gate
-version: 0.3.0
+version: 0.3.1
 kind: backend
 author: Agent Smith (WeRoll fleet)
 description: >-
@@ -53,5 +53,7 @@ description: >-
   Kill switch: HERMES_KANBAN_PR_GATE_DISABLE=1. Fails OPEN with a logged warning on
   gh/git/network faults (25 s bound on gh) — consistent with the rest of this
   plugin; `[Release]` cards are left to the kernel gate untouched.
+  0.3.1 (2026-09-23, gatefix-20260923): tenant map read from the FLEET root, not the
+  worker's profile HERMES_HOME — 0.3.0 found no map in a worker and never fired.
 provides_hooks:
   - pre_tool_call

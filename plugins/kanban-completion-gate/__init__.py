@@ -150,9 +150,16 @@ _NEUTRAL = {"neutral", "skipped"}
 
 
 def _hermes_home() -> Path:
+    """The FLEET root (~/.hermes), never a profile dir (0.3.1).
+
+    A kanban worker runs with HERMES_HOME=<root>/profiles/<p>, where no
+    kanban-tenants.json exists — so 0.3.0 read nothing and the PR gate was
+    silently out of scope for every worker. Same climb as kernel ``_fleet_home``.
+    """
     env = os.environ.get("HERMES_HOME")
     if env:
-        return Path(env)
+        h = Path(env).expanduser()
+        return h.parent.parent if h.parent.name == "profiles" else h
     # .../.hermes/hermes-agent/plugins/kanban-completion-gate/__init__.py -> .hermes
     return Path(__file__).resolve().parents[3]
 

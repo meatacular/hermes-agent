@@ -197,3 +197,16 @@ def test_gh_nonzero_rc_fails_open(mod, tmp_path, caplog, monkeypatch):
     with caplog.at_level(logging.WARNING, logger=mod.logger.name):
         assert _complete(mod) is None
     assert any("FAILING OPEN" in r.getMessage() for r in caplog.records)
+
+
+def test_tenant_map_resolves_to_fleet_root_from_a_profile_home(tmp_path, monkeypatch):
+    """0.3.1: a worker's HERMES_HOME is <root>/profiles/<p>; the map lives at <root>."""
+    m = _load()
+    root = tmp_path / "fleet"; prof = root / "profiles" / "rodge"; prof.mkdir(parents=True)
+    (root / "kanban-tenants.json").write_text(json.dumps(
+        {"weroll-app": {"ci_gate": {"check_name": "ci", "repo": "meatacular/weroll-app"}}}))
+    monkeypatch.setenv("HERMES_HOME", str(prof))
+    assert m._hermes_home() == root
+    assert m._tenant_cfg("weroll-app")["ci_gate"]["check_name"] == "ci"
+    monkeypatch.setenv("HERMES_HOME", str(root))           # root itself is unchanged
+    assert m._hermes_home() == root
