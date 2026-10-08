@@ -128,19 +128,27 @@ def _profile_author() -> str:
     return _specify_author("decomposer")
 
 
-def _resolve_profile_from_cfg(cfg: dict, key: str) -> str:
-    """``kanban.<key>`` if it names an existing profile, else the active
-    default profile — so a task is never stranded for lack of an owner.
+def _resolve_profile_from_cfg(cfg: dict, key: str, *, fallback: Optional[str] = None) -> str:
+    """``kanban.<key>`` if it names an existing profile, else ``fallback``
+    (the root task's own assignee) if that does, else the active default
+    profile — so a task is never stranded for lack of an owner.
     ``orchestrator_profile`` owns the root after fan-out; ``default_assignee``
-    catches children the decomposer can't route."""
+    catches children the decomposer can't route.
+
+    The root's assignee sits before the active profile because the decomposer
+    runs inside whatever profile hosts the dispatcher — an operator's
+    credential-less incognito profile, say — and that profile must never
+    silently become the owner of work the card was assigned away from (#114294).
+    """
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
     explicit = (kanban_cfg.get(key) or "").strip()
-    if explicit:
-        try:
-            if profiles_mod.profile_exists(explicit):
-                return explicit
-        except Exception:
-            pass
+    for candidate in (explicit, (fallback or "").strip()):
+        if candidate:
+            try:
+                if profiles_mod.profile_exists(candidate):
+                    return candidate
+            except Exception:
+                pass
     try:
         return profiles_mod.get_active_profile_name() or "default"
     except Exception:
@@ -320,8 +328,10 @@ class _Routing:
     valid_names: set[str]
 
 
-def _load_routing(*, tenant: Optional[str] = None, config: Optional[dict] = None) -> _Routing:
+def _load_routing(*, tenant: Optional[str] = None, config: Optional[dict] = None,
+                  root_assignee: Optional[str] = None) -> _Routing:
     # catch-up 20260917: upstream's readonly config load (never raises) + the fleet's
+    # catch-up 20261009: + upstream root_assignee fallback (#114294).
     # tenant-scoped orchestrator seam (039e203c12e8) — both kept.
     if config is None:
         from hermes_cli.config import load_config_readonly
@@ -333,8 +343,8 @@ def _load_routing(*, tenant: Optional[str] = None, config: Optional[dict] = None
         cfg = config
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
     roster, valid_names = _build_roster()
-    orchestrator = _resolve_profile_from_cfg(cfg, "orchestrator_profile")
-    default_assignee = _resolve_profile_from_cfg(cfg, "default_assignee")
+    orchestrator = _resolve_profile_from_cfg(cfg, "orchestrator_profile", fallback=root_assignee)
+    default_assignee = _resolve_profile_from_cfg(cfg, "default_assignee", fallback=root_assignee)
     # Config is the policy seam: profiles are keyed to the tenants they may
     # orchestrate. An absent tenant preserves the historical configured route.
     # A wildcard lets the configured fallback retain today's default behavior.
@@ -502,7 +512,7 @@ def decompose_task(
             "fan-out trigger)",
         )
 
-    routing = _load_routing(tenant=task.tenant)
+    routing = _load_routing(tenant=task.tenant, root_assignee=task.assignee)
     raw, reason = _call_aux(
         "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,
         user=_USER_TEMPLATE.format(
@@ -550,12 +560,3 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
             and int(row.block_recurrences or 0) >= kb.BLOCK_RECURRENCE_LIMIT
         )
     ]
-
-
-# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
-# Names external plugins imported from this module before the Sep 2026 decomposition.
-# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
-# The whole block is removed by reverting the commit that added it.
-import json  # noqa: F401,E402
-import os  # noqa: F401,E402
-# ---- END PLUGIN-COMPAT ----
