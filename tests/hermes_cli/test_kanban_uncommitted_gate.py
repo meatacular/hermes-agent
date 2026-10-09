@@ -124,6 +124,10 @@ def _gate_path():
     env = os.environ.get("HERMES_HOME", "")
     if env and _TEST_HOME_MARKER not in env:
         roots.append(_P(env))
+    # catch-up 20261009: the plugin ships in this repo's plugins/ (no user-plugin
+    # shadow exists in ~/.hermes/plugins), and upstream's home-I/O guard refuses
+    # even a stat of the real home inside a test — so look in the repo first.
+    roots.append(_P(__file__).resolve().parents[2])
     roots.append(_P.home() / ".hermes")
     for r in roots:
         p = r / "plugins" / "kanban-completion-gate" / "__init__.py"
@@ -140,7 +144,7 @@ def test_gate_plugin_is_discoverable():
     on 2026-09-09. On a machine with no Hermes install at all there is nothing
     to test and a skip is honest; anywhere else, absence is a FAILURE.
     """
-    if not (_P.home() / ".hermes").is_dir():
+    if _gate_path() is None and not (_P.home() / ".hermes").is_dir():
         pytest.skip("no Hermes root on this machine — nothing to discover")
     assert _gate_path() is not None, (
         "kanban-completion-gate is not installed under any candidate root "

@@ -28,6 +28,9 @@ def test_unknown_assignee_skip_writes_per_task_event(tmp_path, monkeypatch):
     _isolated_home(tmp_path, monkeypatch)
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    # fleet: create_task parks unknown assignees in triage (kb._assignee_is_known);
+    # bypass that guard here so the dispatcher-side skip is still exercised.
+    monkeypatch.setattr(kb, "_assignee_is_known", lambda a: True)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="demo", assignee="no-such-profile")
         res = kbd.dispatch_once(conn, dry_run=False)
@@ -47,6 +50,9 @@ def test_unknown_assignee_skip_event_is_written_once(tmp_path, monkeypatch):
     _isolated_home(tmp_path, monkeypatch)
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    # fleet: create_task parks unknown assignees in triage (kb._assignee_is_known);
+    # bypass that guard here so the dispatcher-side skip is still exercised.
+    monkeypatch.setattr(kb, "_assignee_is_known", lambda a: True)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="demo", assignee="no-such-profile")
         kbd.dispatch_once(conn, dry_run=True)

@@ -46,6 +46,9 @@ def test_ac1_pre_tool_hook_routes_review_mint_to_parent_worktree(tmp_path, monke
     db = tmp_path / "kanban.db"
     _board(db, repo)
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    # catch-up 20261009: an explicit board= outranks the DB pin outside a dispatched
+    # worker; run as one (as production does) so the pin still applies.
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_reviewwt_probe")
     plugin = _plugin()
     result = plugin.on_pre_tool_call(tool_name="kanban_create", args={
         "title": "Review implementation", "assignee": "rodge", "parents": ["impl"]})
@@ -66,6 +69,9 @@ def test_ac2_real_kanban_create_mints_parent_workspace(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    # catch-up 20261009: an explicit board= outranks the DB pin outside a dispatched
+    # worker; run as one (as production does) so the pin still applies.
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_reviewwt_probe")
     monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
 
     from hermes_cli import plugins as plugin_manager
@@ -118,6 +124,9 @@ def test_ac3_controls_fail_open_and_explicit_workspace_wins(tmp_path, monkeypatc
     db = tmp_path / "kanban.db"
     _board(db, repo)
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    # catch-up 20261009: an explicit board= outranks the DB pin outside a dispatched
+    # worker; run as one (as production does) so the pin still applies.
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_reviewwt_probe")
     plugin = _plugin()
     base = {"title": "Review implementation", "assignee": "rodge", "parents": ["impl"]}
     assert plugin.verdict({**base, "workspace_kind": "worktree"}) is None
@@ -137,6 +146,9 @@ def test_ac4_missing_parent_worktree_is_logged_and_untouched(tmp_path, monkeypat
         )
         conn.commit()
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+    # catch-up 20261009: an explicit board= outranks the DB pin outside a dispatched
+    # worker; run as one (as production does) so the pin still applies.
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_reviewwt_probe")
     plugin = _plugin()
     with caplog.at_level("INFO"):
         assert plugin.on_pre_tool_call(tool_name="kanban_create", args={

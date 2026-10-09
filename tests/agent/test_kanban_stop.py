@@ -179,7 +179,9 @@ def test_four_tool_terminal_set_is_our_deliberate_divergence():
     hands off with kanban_request_review has closed its run and must not be
     steered into completing an unreviewed card (Rodge, 2026-09-01)."""
     from agent.kanban_stop import _TERMINAL_KANBAN_TOOLS
-    assert _TERMINAL_KANBAN_TOOLS == {
+    # catch-up 20261009: upstream adopted this set and added kanban_schedule;
+    # the invariant is that the review handoffs stay terminal.
+    assert _TERMINAL_KANBAN_TOOLS >= {
         "kanban_complete", "kanban_block",
         "kanban_request_review", "kanban_request_changes",
     }

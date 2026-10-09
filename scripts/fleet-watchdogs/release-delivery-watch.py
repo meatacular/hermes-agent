@@ -154,9 +154,9 @@ def main() -> int:
                 f"just merged. The three conditions checked here are a stronger claim than the "
                 f"gate's, and are only answerable after the merge.")
         sh(["hermes", "kanban", "comment", cid, note, "--author", MARKER])
-        if sh(["hermes", "kanban", "complete", cid]).returncode != 0:
+        if sh(["hermes", "kanban", "complete", cid, "--summary", f"{MARKER}: delivery verified. {why}"]).returncode != 0:
             sh(["hermes", "kanban", "unblock", cid, "--reason", f"{MARKER}: delivery verified"])
-            sh(["hermes", "kanban", "complete", cid])
+            sh(["hermes", "kanban", "complete", cid, "--summary", f"{MARKER}: delivery verified. {why}"])
         print(f"  completed {cid}")
     return 0
 

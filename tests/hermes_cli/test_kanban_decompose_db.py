@@ -396,7 +396,7 @@ def test_decompose_fresh_triage_still_sets_root_assignee(kanban_home):
 
 
 def _complete(conn, tid):
-    kb.complete_task(conn, tid)
+    kb.complete_task(conn, tid, summary="test completion")
 
 
 def test_decompose_hold_child_is_operator_hold_and_never_autopromotes(kanban_home):
@@ -435,7 +435,7 @@ def test_decompose_hold_child_is_operator_hold_and_never_autopromotes(kanban_hom
 
     # Complete the impl parent. recompute_ready must NOT promote the held child.
     with kbc.connect() as conn:
-        kb.complete_task(conn, impl_id)
+        kb.complete_task(conn, impl_id, summary="test completion")
         kb.recompute_ready(conn)
 
     with kbc.connect() as conn:

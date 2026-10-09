@@ -1640,6 +1640,7 @@ class SessionDB(
         cache_discount: float = 0.0,
         total_cost: float = 0.0,
         source: Optional[str] = None,
+        task: str = "",
     ) -> None:
         """Update token counters and backfill model if not already set.
 
@@ -1755,8 +1756,11 @@ class SessionDB(
             # call. If it fails and fallback succeeds, the first accounted usage
             # event is the first authoritative route. After that, preserve the
             # legacy row: one row cannot represent mixed-provider usage.
+            # catch-up 20261009: upstream ``task`` (a per-turn route such as
+            # ``voice_chat``) counts in the totals but never becomes the session's route.
             first_accounted_route = (
-                existing_api_calls == 0
+                not task
+                and existing_api_calls == 0
                 and has_accounted_usage
                 and bool(model)
                 and bool(billing_provider)
@@ -1789,6 +1793,7 @@ class SessionDB(
                     cost_status=cost_status,
                     cost_source=cost_source,
                     api_call_count=api_call_count,
+                    task=task,
                     provider_name=provider_name,
                     native_tokens_prompt=native_tokens_prompt,
                     native_tokens_cached=native_tokens_cached,

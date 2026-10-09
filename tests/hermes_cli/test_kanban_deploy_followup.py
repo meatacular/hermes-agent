@@ -104,6 +104,7 @@ def test_repeat_approval_cannot_create_second_deploy_followup(conn):
     assert kb.complete_task(
         conn,
         task_id,
+        summary="test completion",
         metadata={"review_outcome": "approved"},
         expected_run_id=review.current_run_id,
     )
@@ -142,7 +143,7 @@ def test_non_platform_approval_creates_nothing(conn):
     review = kb.claim_review_task(conn, task_id)
     assert review is not None
     assert kb.complete_task(
-        conn, task_id, metadata={"review_outcome": "approved"},
+        conn, task_id, summary="test completion", metadata={"review_outcome": "approved"},
         expected_run_id=review.current_run_id,
     )
     assert _children_of(conn, task_id) == []
@@ -162,7 +163,7 @@ def test_scratch_worktree_approval_creates_nothing(conn):
     review = kb.claim_review_task(conn, task_id)
     assert review is not None
     assert kb.complete_task(
-        conn, task_id, metadata={"review_outcome": "approved"},
+        conn, task_id, summary="test completion", metadata={"review_outcome": "approved"},
         expected_run_id=review.current_run_id,
     )
     assert _children_of(conn, task_id) == []
@@ -174,6 +175,7 @@ def test_non_approval_completion_creates_nothing(conn):
     assert kb.complete_task(
         conn,
         task_id,
+        summary="test completion",
         metadata={"review_outcome": "escalated", "note": "needs human"},
         expected_run_id=review.current_run_id,
     )
