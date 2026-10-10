@@ -132,8 +132,14 @@ def dangling_refs(body: str, own_present: set, refs_by_skill: dict) -> list:
             if named:
                 # longest name wins: weroll-knowledge-search over weroll-knowledge
                 owner = max(named, key=len)
-                if fname not in refs_by_skill[owner]:
-                    out.add(fname)          # named skill really lacks it -- still a bad pointer
+                # trim-b1b3-danglingrefs-20261011: a skill name in PROSE before the path is not a
+                # pointer into that skill when the file sits in this skill's own references/ --
+                # "(nano-pdf CLI): `references/nano-pdf-editing.md`", "`npx wrangler ...` or see
+                # references/cli-and-mcp.md". Nine live findings (pdf x5, cloudflare-email-service,
+                # hermes-agent, hermes-multiagent-orchestration) were all valid files read this way.
+                # A named skill that lacks it AND no own copy is still a bad pointer.
+                if fname not in refs_by_skill[owner] and fname not in own_present:
+                    out.add(fname)
                 continue
             if fname not in own_present:
                 out.add(fname)

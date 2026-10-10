@@ -172,6 +172,17 @@ def test_a_named_skill_that_really_lacks_the_file_is_still_reported():
     assert dangling_of(body, own=set(), others={"kanban-ops": {"gridlock.md"}}) == ["nope.md"]
 
 
+def test_a_prose_skill_name_does_not_strand_an_own_reference_that_exists():
+    """Live line, pdf/SKILL.md on five profiles, 2026-10-11: `nano-pdf` is also a skill name."""
+    body = "- **Editing text** (nano-pdf CLI): `references/nano-pdf-editing.md`"
+    assert dangling_of(body, own={"nano-pdf-editing.md"}, others={"nano-pdf": set()}) == []
+
+
+def test_CONTROL_a_prose_skill_name_with_no_file_anywhere_is_still_dangling():
+    body = "- **Editing text** (nano-pdf CLI): `references/nano-pdf-editing.md`"
+    assert dangling_of(body, own=set(), others={"nano-pdf": set()}) == ["nano-pdf-editing.md"]
+
+
 def test_skills_of_does_not_flag_a_real_cross_skill_pointer(tmp_path):
     """End to end through the walker, not just the pure helper."""
     _skill(tmp_path, "devops", "kanban-ops", "Use when working the board.",
