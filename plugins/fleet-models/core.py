@@ -682,8 +682,8 @@ def soul_model_line(doc: dict, p: str) -> str:
         same = set(helpers.values())
         parts.append(("helpers " + next(iter(same))) if len(same) == 1 else
                      "helpers " + "; ".join(f"{t} {c}" for t, c in helpers.items()))
-    return (f"- **Model:** {' · '.join(parts)}. ModelArk is the flat Coding Plan subscription (recorded as $0 "
-            f"\"modelark subscription\"); OpenRouter calls are billed and always carry data_collection deny. "
+    return (f"- **Model:** {' · '.join(parts)}. DeepSeek direct is metered and its cost is estimated from "
+            f"the rate card; OpenRouter calls are invoiced and always carry data_collection deny. "
             f"Source: `~/.hermes/fleet/models.yaml` — changed only on the dashboard's Models tab. {SOUL_LINE}")
 
 
