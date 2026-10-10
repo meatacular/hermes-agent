@@ -1,5 +1,4 @@
-"""Per-worker card cost cap: `kanban.default_max_cost` each (3.00), one extension to
-`kanban.max_cost_hard_ceiling` (4.50). Also renders the policy into worker prompts (1.1.0).
+"""Per-worker card cost cap: $1.00 each, one extension to $1.50 each.
 
 See plugin.yaml for why this is two wrappers and not a kernel change. The short version: the
 kernel already measures the RUNNING ASSIGNEE'S own ledger, so the base allowance was already per
@@ -163,58 +162,5 @@ def install() -> list:
     return done
 
 
-# ── the policy, rendered (trim-a1-costcap-section-20261011) ─────────────────────────────────
-# Until 2026-10-11 this policy lived as five hand-kept copies in the bob/jobsy/karl/rodge/steve-o
-# SOULs, and all five said "$1.00, extend once by $0.50, Richie at $1.50" while the config had been
-# 3.0 / 4.5 since the 2026-09-18 freeze — six agents asked on 2026-10-11 all quoted the stale figure.
-# Rendering it HERE, from the same two resolvers enforce_max_cost and set_task_max_cost read under
-# the worker's own HERMES_HOME, means the prompt cannot disagree with the control again.
-SECTION_ID = "kanban-cost-cap"
-WORKER_PROFILES = frozenset({"bob", "jobsy", "karl", "rodge", "steve-o"})
-SECTION_MAX_CHARS = 2000
-
-
-def policy_text(base: float, hard: float) -> str:
-    return (
-        "## Cost cap (rendered from the live cap control — this is the rule)\n"
-        f"Each worker on a card has its own **${base:.2f}** allowance, measured on that worker's own "
-        "spend. Passing it SIGTERMs your worker mid-run and blocks the card `kind=cost_cap`; work after "
-        "that point is lost, so treat it as a real boundary. **Smith, as overwatch,** may extend a "
-        f"worker **once**, to at most **${hard:.2f}**; a second breach by the same worker stays "
-        "blocked and Richie decides.\n\n"
-        "**No agent writes dollar estimates, and no agent sets or changes a cap** — not by editing "
-        "`max_cost`, not by asking Smith. Points are the card author's, set at mint.\n\n"
-        "**Work to the budget.** Prefer the cheap verification that answers the question. If mid-run "
-        "you can see you will not finish inside it, **block and say why** — an honest block costs less "
-        "than a SIGTERM and gives overwatch the evidence.\n\n"
-        "**Resuming a card is not restarting it.** Read the card's comments first; Rodge's newest "
-        "`outstanding-checklist` is the authoritative list of what is still missing."
-    )
-
-
-def render(session_info) -> str:
-    """For the five workers, and for any process running a claimed card. "" on any failure —
-    a half-stated cap is worse than none, and a render error must never cost a session."""
-    try:
-        import os
-        prof = str((session_info or {}).get("profile_name") or "")
-        if prof not in WORKER_PROFILES and not os.environ.get("HERMES_KANBAN_TASK"):
-            return ""
-        from hermes_cli import kanban_db as kdb
-        base, hard = kdb.resolve_default_max_cost(), kdb.resolve_max_cost_hard_ceiling()
-        if not base or not hard:
-            logger.warning("per-worker cap: cap keys unresolved — cost-cap section not rendered")
-            return ""
-        return policy_text(float(base), float(hard))
-    except Exception:  # noqa: BLE001
-        logger.debug("per-worker cap: section render failed open", exc_info=True)
-        return ""
-
-
-def register(ctx) -> None:  # plugin loader entry point
-    logger.info("kanban-cost-cap-per-worker 1.1: wrapped %s", install())
-    try:
-        ctx.register_system_prompt_section(SECTION_ID, render, position="after_memory",
-                                           max_chars=SECTION_MAX_CHARS)
-    except Exception as exc:  # noqa: BLE001 — the cap itself must still load
-        logger.warning("per-worker cap: prompt section not registered (%s)", exc)
+def register(ctx) -> None:  # noqa: ARG001 — plugin loader entry point
+    logger.info("kanban-cost-cap-per-worker 1.0: wrapped %s", install())

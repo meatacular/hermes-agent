@@ -1,12 +1,10 @@
 name: kanban-cost-cap-per-worker
-version: 1.1.0
+version: 1.0.0
 kind: backend
 author: Claude (Cowork) for Richie, 2026-09-15
 description: >-
-  The cap is PER WORKER PER CARD, not per card: kanban.default_max_cost each (3.00 since the
-  2026-09-18 freeze), extendable once to kanban.max_cost_hard_ceiling (4.50), and after that the
-  card must be dealt with. 1.1.0 (2026-10-11) also renders the policy into the five workers'
-  prompts from those same two resolvers (section `kanban-cost-cap`), replacing five SOUL copies. Richie, 2026-09-15 — "similar to turn caps", which are
+  The cap is PER WORKER PER CARD, not per card: $1.00 each, extendable once to $1.50 each, and
+  after that the card must be dealt with. Richie, 2026-09-15 — "similar to turn caps", which are
   already per session rather than per card.
 
   Why this is a small plugin and not a kernel change: the kernel already compares a card's cap
