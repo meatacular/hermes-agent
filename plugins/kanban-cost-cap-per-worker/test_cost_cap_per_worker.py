@@ -154,3 +154,33 @@ def test_install_is_idempotent(monkeypatch):
     first = cap.install()
     assert sorted(first) == ["enforce_max_cost", "set_task_max_cost"]
     assert cap.install() == [], "second install wraps nothing"
+
+
+# ── the rendered policy (trim-a1-costcap-section-20261011) ─────────────────────────────────────
+
+def test_section_states_the_configured_numbers_not_the_2026_09_06_ones():
+    txt = cap.policy_text(3.0, 4.5)
+    assert "$3.00" in txt and "$4.50" in txt
+    assert "$1.00" not in txt and "$1.50" not in txt and "$0.50" not in txt
+
+
+def test_section_renders_for_a_worker_profile_only(monkeypatch):
+    import sys, types
+    fake = types.SimpleNamespace(resolve_default_max_cost=lambda: 3.0,
+                                 resolve_max_cost_hard_ceiling=lambda: 4.5)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake)
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.SimpleNamespace(kanban_db=fake))
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    assert "$3.00" in cap.render({"profile_name": "bob"})
+    assert cap.render({"profile_name": "axel"}) == ""          # CONTROL: a front door gets nothing
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_x")
+    assert "$3.00" in cap.render({"profile_name": "axel"})     # ...unless it is running a card
+
+
+def test_section_renders_nothing_when_the_keys_cannot_be_read(monkeypatch):
+    import sys, types
+    fake = types.SimpleNamespace(resolve_default_max_cost=lambda: None,
+                                 resolve_max_cost_hard_ceiling=lambda: 4.5)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake)
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.SimpleNamespace(kanban_db=fake))
+    assert cap.render({"profile_name": "bob"}) == ""
