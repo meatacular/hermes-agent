@@ -203,6 +203,30 @@ def test_validation_blocks_what_must_never_ship(core, fleet):
     assert not r["ok"] and "moved on" in r["errors"][0]
 
 
+def test_app_slots_are_validated_and_change_no_config(core, fleet):
+    """BackupBrain and Old Mate read their chains from models.json; an app-slot edit is validated,
+    revisioned and revertable like any apply, and compiles into no config at all."""
+    doc = _signed_off(core, fleet)
+    assert core.apply(doc, by="test", root=fleet, unlock=("root",))["ok"]
+    doc = copy.deepcopy(core.load_doc(fleet, fresh=True))
+    before = {p: core.cfg_path(p, fleet).read_text() for p in core.PROFILES}
+    doc["backupbrain"] = {"providers": ["openrouter"], "brainbot": ["v41-flash", "glm", "m3"], "drafts": ["glm", "m3"]}
+    r = core.apply(doc, by="test", root=fleet)
+    assert r["ok"] and r["changed"] == [], r
+    assert {p: core.cfg_path(p, fleet).read_text() for p in core.PROFILES} == before
+    assert json.loads((fleet / "fleet" / "models.json").read_text())["backupbrain"]["brainbot"][0] == "v41-flash"
+    bad = copy.deepcopy(doc); bad["backupbrain"]["brainbot"] = ["ma-v4-flash", "m3"]
+    assert any("allows only openrouter" in e for e in core.validate(bad)[0])
+    bad = copy.deepcopy(doc); bad["backupbrain"]["chat"] = ["m3"]
+    assert any("not a slot" in e for e in core.validate(bad)[0])
+    bad = copy.deepcopy(doc); bad["backupbrain"]["drafts"] = []
+    assert any("empty chain" in e for e in core.validate(bad)[0])
+    bad = copy.deepcopy(doc); bad["models"]["m3"]["tools"] = False
+    assert any("tool calling cannot run brainbot" in e for e in core.validate(bad)[0])
+    bad = copy.deepcopy(doc); bad["old_mate"] = {"clean": ["nope"]}
+    assert any("old_mate.clean: unknown model" in e for e in core.validate(bad)[0])
+
+
 def test_hand_edit_is_reported_as_drift(core, fleet):
     assert core.apply(_signed_off(core, fleet), by="test", root=fleet, unlock=("root",))["ok"]
     f = core.cfg_path("karl", fleet)

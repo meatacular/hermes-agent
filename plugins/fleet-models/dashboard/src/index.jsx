@@ -27,6 +27,13 @@ const PROV_LABEL = {
   deepseek: "DeepSeek direct · metered (estimated)",
 };
 const REASONING = ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
+// Apps outside the fleet that read their own chains from models.json (core.APPS).
+const APP_INFO = {
+  backupbrain: { name: "BackupBrain", role: "reads these on every call — no restart",
+    slots: { brainbot: ["BrainBot", "the chat agent — needs tool calling"], drafts: ["Email drafts", "replies written in Richie's voice"] } },
+  old_mate: { name: "Old Mate", role: "dictation app — reads these on every call",
+    slots: { clean: ["Clean", "tidies dictation — fast, reasoning off"], ask: ["Ask", "answers about the screen"] } },
+};
 const SLOT_LABEL = { main: "Main loop", subagents: "Subagents", cron: "Cron jobs" };
 const TASK_LABEL = { vision: "Vision", compression: "Compression", title_generation: "Titles",
   background_review: "Background review", goal_judge: "Goal judge", kanban_decomposer: "Decomposer",
@@ -555,7 +562,57 @@ function SlotRow({ doc, label, spec, live, onChange, nullable, nullLabel, withRe
 function listInput(v) { return (v || []).join(", "); }
 function parseList(s) { return s.split(",").map((x) => x.trim()).filter(Boolean); }
 
+function AgentNav({ state, draft, p, setP }) {
+  const apps = Object.keys(state.apps || {});
+  return (
+    <nav className="fm-agent-nav">
+      {state.profiles.map((q) => (
+        <button key={q} className={cls("fm-agent-tab", q === p && "is-active", (state.drift || {})[q] && "has-drift")} onClick={() => setP(q)}>
+          {draft.agents[q].name || q}{draft.agents[q].locked ? " 🔒" : ""}
+        </button>
+      ))}
+      {apps.length ? <span className="fm-agent-sep">Apps</span> : null}
+      {apps.map((k) => (
+        <button key={k} className={cls("fm-agent-tab", "app:" + k === p && "is-active")} onClick={() => setP("app:" + k)}>
+          {(APP_INFO[k] || {}).name || k}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function AppView({ state, draft, setDraft, app, setP }) {
+  const info = APP_INFO[app] || { name: app, slots: {} };
+  const slots = Object.keys((state.apps || {})[app] || {});
+  const a = draft[app] || {};
+  const allowed = a.providers || null;
+  const set = (fn) => setDraft((d) => { const n = clone(d); n[app] = n[app] || {}; fn(n[app], n); return n; });
+  const applied = state.doc || {};
+  const liveOf = (slot) => { const c = chainOf((applied[app] || {})[slot]); return c.length ? c.filter((x) => (applied.models || {})[x]).map((x) => [applied.models[x].provider, applied.models[x].id]) : null; };
+  const fits = (slot) => (m) => (!allowed || allowed.includes(m.provider)) && (!state.apps[app][slot] || m.tools !== false);
+  return (
+    <div className="fm-agent">
+      <AgentNav state={state} draft={draft} p={"app:" + app} setP={setP} />
+      <Section title={`${info.name} — ${info.role || ""}`} right={allowed ? <Badge tone="ok">{allowed.join(", ")} only</Badge> : null}>
+        <div className="fm-slots-edit">
+          {slots.map((slot) => {
+            const [label, hint] = (info.slots || {})[slot] || [slot, ""];
+            return (
+              <SlotRow key={slot} doc={draft} setDraft={setDraft} label={label} hint={hint} spec={a[slot] == null ? null : a[slot]}
+                live={liveOf(slot)} filter={fits(slot)}
+                nullable nullLabel="app's own fallback" onChange={(c) => set((x) => { if (c == null) delete x[slot]; else x[slot] = c; })} />
+            );
+          })}
+        </div>
+        {a.why ? <p className="fm-muted fm-small">{a.why}</p> : null}
+        <p className="fm-muted fm-small">Applying changes no agent config. The app reads models.json on its next call. Live shows the last applied chain.</p>
+      </Section>
+    </div>
+  );
+}
+
 function AgentView({ state, draft, setDraft, p, setP }) {
+  if (String(p).startsWith("app:")) return <AppView state={state} draft={draft} setDraft={setDraft} app={p.slice(4)} setP={setP} />;
   const a = draft.agents[p];
   const live = state.live[p] || {};
   const set = (fn) => setDraft((d) => { const n = clone(d); fn(n.agents[p], n); return n; });
@@ -566,13 +623,7 @@ function AgentView({ state, draft, setDraft, p, setP }) {
   const toolsOk = (m) => m.tools !== false;
   return (
     <div className="fm-agent">
-      <nav className="fm-agent-nav">
-        {state.profiles.map((q) => (
-          <button key={q} className={cls("fm-agent-tab", q === p && "is-active", (state.drift || {})[q] && "has-drift")} onClick={() => setP(q)}>
-            {draft.agents[q].name || q}{draft.agents[q].locked ? " 🔒" : ""}
-          </button>
-        ))}
-      </nav>
+      <AgentNav state={state} draft={draft} p={p} setP={setP} />
       <Section title={`${a.name || p} — ${a.role || ""}`} right={
         <span className="fm-row">
           {a.locked ? <Badge tone="warn">locked</Badge> : null}

@@ -336,7 +336,50 @@
       return (v || []).join(", ");
     }, parseList2 = function(s) {
       return s.split(",").map((x) => x.trim()).filter(Boolean);
+    }, AgentNav2 = function({ state, draft, p, setP }) {
+      const apps = Object.keys(state.apps || {});
+      return /* @__PURE__ */ h("nav", { className: "fm-agent-nav" }, state.profiles.map((q) => /* @__PURE__ */ h("button", { key: q, className: cls2("fm-agent-tab", q === p && "is-active", (state.drift || {})[q] && "has-drift"), onClick: () => setP(q) }, draft.agents[q].name || q, draft.agents[q].locked ? " \u{1F512}" : "")), apps.length ? /* @__PURE__ */ h("span", { className: "fm-agent-sep" }, "Apps") : null, apps.map((k) => /* @__PURE__ */ h("button", { key: k, className: cls2("fm-agent-tab", "app:" + k === p && "is-active"), onClick: () => setP("app:" + k) }, (APP_INFO[k] || {}).name || k)));
+    }, AppView2 = function({ state, draft, setDraft, app, setP }) {
+      const info = APP_INFO[app] || { name: app, slots: {} };
+      const slots = Object.keys((state.apps || {})[app] || {});
+      const a = draft[app] || {};
+      const allowed = a.providers || null;
+      const set = (fn) => setDraft((d) => {
+        const n = clone(d);
+        n[app] = n[app] || {};
+        fn(n[app], n);
+        return n;
+      });
+      const applied = state.doc || {};
+      const liveOf = (slot) => {
+        const c = chainOf((applied[app] || {})[slot]);
+        return c.length ? c.filter((x) => (applied.models || {})[x]).map((x) => [applied.models[x].provider, applied.models[x].id]) : null;
+      };
+      const fits = (slot) => (m) => (!allowed || allowed.includes(m.provider)) && (!state.apps[app][slot] || m.tools !== false);
+      return /* @__PURE__ */ h("div", { className: "fm-agent" }, /* @__PURE__ */ h(AgentNav2, { state, draft, p: "app:" + app, setP }), /* @__PURE__ */ h(Section2, { title: `${info.name} \u2014 ${info.role || ""}`, right: allowed ? /* @__PURE__ */ h(Badge2, { tone: "ok" }, allowed.join(", "), " only") : null }, /* @__PURE__ */ h("div", { className: "fm-slots-edit" }, slots.map((slot) => {
+        const [label, hint] = (info.slots || {})[slot] || [slot, ""];
+        return /* @__PURE__ */ h(
+          SlotRow2,
+          {
+            key: slot,
+            doc: draft,
+            setDraft,
+            label,
+            hint,
+            spec: a[slot] == null ? null : a[slot],
+            live: liveOf(slot),
+            filter: fits(slot),
+            nullable: true,
+            nullLabel: "app's own fallback",
+            onChange: (c) => set((x) => {
+              if (c == null) delete x[slot];
+              else x[slot] = c;
+            })
+          }
+        );
+      })), a.why ? /* @__PURE__ */ h("p", { className: "fm-muted fm-small" }, a.why) : null, /* @__PURE__ */ h("p", { className: "fm-muted fm-small" }, "Applying changes no agent config. The app reads models.json on its next call. Live shows the last applied chain.")));
     }, AgentView2 = function({ state, draft, setDraft, p, setP }) {
+      if (String(p).startsWith("app:")) return /* @__PURE__ */ h(AppView2, { state, draft, setDraft, app: p.slice(4), setP });
       const a = draft.agents[p];
       const live = state.live[p] || {};
       const set = (fn) => setDraft((d) => {
@@ -349,7 +392,7 @@
       const drift = (state.drift || {})[p];
       const visionOk = (m) => !!m.vision;
       const toolsOk = (m) => m.tools !== false;
-      return /* @__PURE__ */ h("div", { className: "fm-agent" }, /* @__PURE__ */ h("nav", { className: "fm-agent-nav" }, state.profiles.map((q) => /* @__PURE__ */ h("button", { key: q, className: cls2("fm-agent-tab", q === p && "is-active", (state.drift || {})[q] && "has-drift"), onClick: () => setP(q) }, draft.agents[q].name || q, draft.agents[q].locked ? " \u{1F512}" : ""))), /* @__PURE__ */ h(Section2, { title: `${a.name || p} \u2014 ${a.role || ""}`, right: /* @__PURE__ */ h("span", { className: "fm-row" }, a.locked ? /* @__PURE__ */ h(Badge2, { tone: "warn" }, "locked") : null, drift ? /* @__PURE__ */ h(Badge2, { tone: "warn", title: drift.join("\n") }, "config drifted from models.yaml") : /* @__PURE__ */ h(Badge2, { tone: "ok" }, "config matches")) }, drift ? /* @__PURE__ */ h("div", { className: "fm-note fm-note--warn" }, drift.map((d, i) => /* @__PURE__ */ h("div", { key: i }, d)), /* @__PURE__ */ h("div", null, "Applying any change rewrites this profile from models.yaml.")) : null, /* @__PURE__ */ h("div", { className: "fm-slots-edit" }, /* @__PURE__ */ h(
+      return /* @__PURE__ */ h("div", { className: "fm-agent" }, /* @__PURE__ */ h(AgentNav2, { state, draft, p, setP }), /* @__PURE__ */ h(Section2, { title: `${a.name || p} \u2014 ${a.role || ""}`, right: /* @__PURE__ */ h("span", { className: "fm-row" }, a.locked ? /* @__PURE__ */ h(Badge2, { tone: "warn" }, "locked") : null, drift ? /* @__PURE__ */ h(Badge2, { tone: "warn", title: drift.join("\n") }, "config drifted from models.yaml") : /* @__PURE__ */ h(Badge2, { tone: "ok" }, "config matches")) }, drift ? /* @__PURE__ */ h("div", { className: "fm-note fm-note--warn" }, drift.map((d, i) => /* @__PURE__ */ h("div", { key: i }, d)), /* @__PURE__ */ h("div", null, "Applying any change rewrites this profile from models.yaml.")) : null, /* @__PURE__ */ h("div", { className: "fm-slots-edit" }, /* @__PURE__ */ h(
         SlotRow2,
         {
           doc: draft,
@@ -1014,7 +1057,7 @@
         }
       ) : null, flash ? /* @__PURE__ */ h("div", { className: cls2("fm-flash", "fm-flash--" + flash.tone) }, flash.msg) : null);
     };
-    tickLabel = tickLabel2, isTick = isTick2, rangeLabel = rangeLabel2, cls = cls2, Pill = Pill2, Chain = Chain2, RungPicker = RungPicker2, ChainEditor = ChainEditor2, Stat = Stat2, relAge = relAge2, BalanceStats = BalanceStats2, DecisionLog = DecisionLog2, Badge = Badge2, Section = Section2, PeriodBar = PeriodBar2, Spark = Spark2, TimeChart = TimeChart2, helperGroups = helperGroups2, LiveChain = LiveChain2, SlotRow = SlotRow2, listInput = listInput2, parseList = parseList2, AgentView = AgentView2, usedBy = usedBy2, HostTable = HostTable2, ModelDetail = ModelDetail2, AddModel = AddModel2, ModelsView = ModelsView2, hrs = hrs2, HomeView = HomeView2, CostsView = CostsView2, BarList = BarList2, DecisionsView = DecisionsView2, PlanPanel = PlanPanel2, ModelsPage = ModelsPage2;
+    tickLabel = tickLabel2, isTick = isTick2, rangeLabel = rangeLabel2, cls = cls2, Pill = Pill2, Chain = Chain2, RungPicker = RungPicker2, ChainEditor = ChainEditor2, Stat = Stat2, relAge = relAge2, BalanceStats = BalanceStats2, DecisionLog = DecisionLog2, Badge = Badge2, Section = Section2, PeriodBar = PeriodBar2, Spark = Spark2, TimeChart = TimeChart2, helperGroups = helperGroups2, LiveChain = LiveChain2, SlotRow = SlotRow2, listInput = listInput2, parseList = parseList2, AgentNav = AgentNav2, AppView = AppView2, AgentView = AgentView2, usedBy = usedBy2, HostTable = HostTable2, ModelDetail = ModelDetail2, AddModel = AddModel2, ModelsView = ModelsView2, hrs = hrs2, HomeView = HomeView2, CostsView = CostsView2, BarList = BarList2, DecisionsView = DecisionsView2, PlanPanel = PlanPanel2, ModelsPage = ModelsPage2;
     const { React } = SDK;
     const h = React.createElement;
     const Fragment = React.Fragment;
@@ -1040,6 +1083,18 @@
       deepseek: "DeepSeek direct \xB7 metered (estimated)"
     };
     const REASONING = ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    const APP_INFO = {
+      backupbrain: {
+        name: "BackupBrain",
+        role: "reads these on every call \u2014 no restart",
+        slots: { brainbot: ["BrainBot", "the chat agent \u2014 needs tool calling"], drafts: ["Email drafts", "replies written in Richie's voice"] }
+      },
+      old_mate: {
+        name: "Old Mate",
+        role: "dictation app \u2014 reads these on every call",
+        slots: { clean: ["Clean", "tidies dictation \u2014 fast, reasoning off"], ask: ["Ask", "answers about the screen"] }
+      }
+    };
     const SLOT_LABEL = { main: "Main loop", subagents: "Subagents", cron: "Cron jobs" };
     const TASK_LABEL = {
       vision: "Vision",
@@ -1181,6 +1236,8 @@
   var SlotRow;
   var listInput;
   var parseList;
+  var AgentNav;
+  var AppView;
   var AgentView;
   var usedBy;
   var HostTable;

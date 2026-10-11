@@ -44,6 +44,11 @@ ARK_KEY_ENV = "HERMES_CUSTOM_MODELARK_API_KEY"
 HOST_KEYS = ("only", "order", "ignore", "sort", "require_parameters", "quantizations")
 ROUTING_KEYS = ("only", "order", "ignore", "sort", "require_parameters")
 SLOTS = ("main", "subagents", "cron")
+# Apps outside the fleet that read their own chains ("app slots") from models.json at request time.
+# Nothing is compiled for them. Top-level key -> {slot: needs tool calling?}. Optional per-app keys:
+# `why` (prose) and `providers` (the providers its slots may use; default all).
+APPS = {"old_mate": {"clean": False, "ask": False}, "backupbrain": {"brainbot": True, "drafts": False}}
+APP_META = ("why", "providers")
 REASONING = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
@@ -243,6 +248,33 @@ def validate(doc: dict, *, previous: Optional[dict] = None, unlock: Tuple[str, .
                 E.append(f"{where}: a model without tool calling cannot run an agent loop")
             if name == "aux.vision" and any(not m.get("vision") for m in known):
                 E.append(f"{where}: every vision rung must accept images")
+            vendors = {m.get("vendor") for m in known}
+            if len(known) > 1 and len(vendors) == 1:
+                W.append(f"{where}: every rung is {vendors.pop()} — one vendor outage takes the whole chain down")
+    for app, slots in APPS.items():
+        a = doc.get(app)
+        if a is None:
+            continue
+        allowed = a.get("providers") or list(PROVIDERS)
+        for slot, spec in a.items():
+            if slot in APP_META:
+                continue
+            where = f"{app}.{slot}"
+            if slot not in slots:
+                E.append(f"{where}: not a slot of {app} ({', '.join(slots)})"); continue
+            ch = chain_of(spec)
+            if not ch:
+                E.append(f"{where}: empty chain")
+            if len(set(ch)) != len(ch):
+                E.append(f"{where}: a model appears twice")
+            for alias in ch:
+                if alias not in models:
+                    E.append(f"{where}: unknown model '{alias}'")
+                elif models[alias].get("provider") not in allowed:
+                    E.append(f"{where}: '{alias}' is {models[alias].get('provider')} — {app} allows only {', '.join(allowed)}")
+            known = [models[x] for x in ch if x in models]
+            if slots[slot] and any(m.get("tools") is False for m in known):
+                E.append(f"{where}: a model without tool calling cannot run {slot}")
             vendors = {m.get("vendor") for m in known}
             if len(known) > 1 and len(vendors) == 1:
                 W.append(f"{where}: every rung is {vendors.pop()} — one vendor outage takes the whole chain down")

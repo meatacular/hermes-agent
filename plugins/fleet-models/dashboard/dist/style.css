@@ -152,6 +152,7 @@
 .fm-agent-nav { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
 .fm-agent-tab { border: 1px solid var(--fm-line); background: var(--color-card); color: var(--color-muted-foreground); border-radius: 999px; padding: 4px 12px; cursor: pointer; }
 .fm-agent-tab.is-active { color: var(--color-primary-foreground); background: var(--color-primary); border-color: var(--color-primary); }
+.fm-agent-sep { align-self: center; margin: 0 4px 0 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--color-muted-foreground); }
 .fm-agent-tab.has-drift { border-color: var(--color-warning, #d97706); }
 .fm-slots-edit { display: flex; flex-direction: column; }
 .fm-slot { display: grid; grid-template-columns: 170px 1fr auto; gap: 12px; padding: 11px 0; border-top: 1px solid var(--fm-line); align-items: start; }

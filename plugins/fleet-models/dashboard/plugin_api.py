@@ -917,6 +917,7 @@ def get_state():
     return {"doc": doc, "revision": int(doc.get("revision") or 0), "live": live, "drift": drift,
             "validation": {"errors": errors, "warnings": warnings}, "history": core.history(root, 40),
             "caps": _caps(root), "runtime": _runtime_status(), "profiles": core.PROFILES,
+            "apps": core.APPS,
             "balances": _direct_provider_balances(root),
             "generated_at": time.time()}
 
