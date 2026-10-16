@@ -19,6 +19,12 @@ are closed here, at the plugin seam, so upstream stays untouched:
    healthy entry of the task's chain.
 3. **Cron has no chain of its own.** ``cron.scheduler`` uses the profile's main chain for every job; we
    let ``cron.fallback_providers`` (written by the compiler) override it, inside cron.scheduler only.
+4. **Zero data retention never reaches the wire.** OpenRouter's ``provider.zdr`` keeps a request off any host
+   that retains prompts, but Hermes' main loop forwards only the six routing keys it knows
+   (``_provider_preferences_for_agent``), so ``provider_routing.zdr`` in a config is dropped. When the
+   compiler has written ``provider_routing.zdr: true`` we add ``zdr: true`` to the main loop's preferences
+   (every slot, every fallback, every child — a pinned child's reset flat filters don't matter, the config
+   is read here) and to every OpenRouter aux request (1.1.0, 2026-10-17: Richie's no-train, no-retain rule).
 
 Bundled + ``kind: backend``: auto-loads in every profile, worker, cron job and the dashboard, which also
 mounts the Models tab from ``dashboard/``. Fail-open everywhere — a bug here must never block a call.
@@ -36,7 +42,7 @@ import sys
 
 logger = logging.getLogger(__name__)
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 _MARK = "_fleet_models_wrapped"
 HOST_PIN_KEYS = ("only", "order", "ignore", "sort", "require_parameters", "quantizations")
 MODEL_SPECIFIC = ("only", "order", "ignore", "quantizations")
@@ -92,6 +98,8 @@ def enforce(kwargs: dict, provider, model, base_url=None, task=None, cfg=None) -
             else:
                 pv[k] = v
     pv["data_collection"] = "deny"
+    if pr.get("zdr") is True:
+        pv["zdr"] = True
     eb["provider"] = pv
     agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
     pin = resolve_per_model_reasoning_effort(str(model or ""), agent_cfg.get("reasoning_overrides") or {})
@@ -115,6 +123,33 @@ def _wrap_build_call_kwargs(orig):
         return out
     setattr(_build_call_kwargs, _MARK, True)
     return _build_call_kwargs
+
+
+def _zdr_on() -> bool:
+    from hermes_cli.config import load_config_readonly
+    pr = (load_config_readonly() or {}).get("provider_routing")
+    return isinstance(pr, dict) and pr.get("zdr") is True
+
+
+_ZDR_WARNED = []
+
+
+def _wrap_provider_preferences(orig):
+    @functools.wraps(orig)
+    def _provider_preferences_for_agent(agent):
+        out = orig(agent)
+        try:
+            # OpenRouter only: these preferences mean nothing to a direct provider (and are never sent to one)
+            if _is_openrouter(getattr(agent, "provider", None), getattr(agent, "base_url", None)) and _zdr_on():
+                out = dict(out or {})
+                out["zdr"] = True
+        except Exception:  # noqa: BLE001 — fail open, as every seam here; `core.py verify` (pre-flight) proves it is on
+            if not _ZDR_WARNED:
+                _ZDR_WARNED.append(1)
+                logger.warning("fleet-models: zdr not added to main-loop preferences", exc_info=True)
+        return out
+    setattr(_provider_preferences_for_agent, _MARK, True)
+    return _provider_preferences_for_agent
 
 
 def _capacity_error(ac, err) -> bool:
@@ -264,6 +299,16 @@ def install() -> list:
                 done.append("chain walk" + (" (async)" if is_async else ""))
     except Exception as exc:  # noqa: BLE001
         logger.warning("fleet-models: aux seams not installed (%s)", exc)
+    try:
+        from agent import chat_completion_helpers as cch
+        fn = getattr(cch, "_provider_preferences_for_agent", None)
+        if fn is not None and not getattr(fn, _MARK, False):
+            cch._provider_preferences_for_agent = _wrap_provider_preferences(fn)
+            done.append("main-loop zdr")
+        elif fn is None:
+            logger.warning("fleet-models: _provider_preferences_for_agent not found — main-loop zdr NOT installed")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fleet-models: main-loop zdr seam not installed (%s)", exc)
     mod = sys.modules.get("cron.scheduler")
     if mod is not None:
         if cron_chain_patch(mod):

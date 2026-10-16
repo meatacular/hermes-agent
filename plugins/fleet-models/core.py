@@ -172,6 +172,10 @@ def validate(doc: dict, *, previous: Optional[dict] = None, unlock: Tuple[str, .
     pol = doc.get("policy") or {}
     if pol.get("data_collection") != "deny":
         E.append("policy.data_collection must be 'deny' — the no-training rule is not editable")
+    if "zdr" in pol and not isinstance(pol["zdr"], bool):
+        E.append("policy.zdr must be true or false")
+    elif pol.get("zdr") is not True:
+        W.append("policy.zdr is off — OpenRouter hosts may keep prompts; Richie's rule is no-train AND no-retain (2026-10-10)")
     models = doc.get("models") or {}
     agents = doc.get("agents") or {}
     for alias, m in models.items():
@@ -370,6 +374,10 @@ def _fallback_list(M: dict, aliases: List[str], existing) -> Any:
     return _seq([_entry(M[a], old.get(M[a]["id"])) for a in aliases])
 
 
+def _zdr(doc: dict) -> bool:
+    return (doc.get("policy") or {}).get("zdr") is True
+
+
 def compile_profile(doc: dict, p: str, d) -> List[str]:
     """Write doc's settings for profile *p* into the round-trip config *d*. Returns change lines.
     Only touches the keys fleet-models owns; everything else in config.yaml is left alone."""
@@ -458,6 +466,8 @@ def compile_profile(doc: dict, p: str, d) -> List[str]:
             # host pins live per MODEL now (provider_routing.models) so they follow the model into
             # any fallback; the task keeps only the no-training floor.
             pv = CommentedMap(); pv["data_collection"] = "deny"
+            if _zdr(doc):
+                pv["zdr"] = True
             _set(eb, "provider", pv, ch, w + ".extra_body")
         elif eb is not None:
             _pop(eb, "provider", ch, w + ".extra_body")
@@ -489,6 +499,12 @@ def compile_profile(doc: dict, p: str, d) -> List[str]:
         else:
             _pop(pr, k, ch, "provider_routing")
     _set(pr, "data_collection", "deny", ch, "provider_routing")
+    # Zero data retention. Hermes' main loop forwards only the six flat keys it knows, so `zdr` reaches the
+    # wire through the plugin's seam (plugins/fleet-models/__init__.py), which reads it from here.
+    if _zdr(doc):
+        _set(pr, "zdr", True, ch, "provider_routing")
+    else:
+        _pop(pr, "zdr", ch, "provider_routing")
     per = CommentedMap()
     for alias in used:
         mm = M[alias]
@@ -564,6 +580,8 @@ def _routing_for(cfg: dict, model_id: str) -> dict:
     flat = {k: pr.get(k) for k in ("only", "ignore", "order", "sort", "require_parameters", "data_collection")}
     per = (pr.get("models") or {}).get(model_id) or {}
     merged = {**flat, **{k: v for k, v in per.items() if k in flat}}
+    if pr.get("zdr") is True:
+        merged["zdr"] = True          # added by the plugin's seam, on every OpenRouter request
     return {k: v for k, v in merged.items() if v}
 
 
@@ -629,6 +647,8 @@ def verify_profile(doc: dict, p: str, cfg: dict) -> List[str]:
             r = eff["routing"].get(mm["id"], {})
             if r.get("data_collection") != "deny":
                 bad.append(f"{p}: {mm['id']} would be served WITHOUT data_collection: deny")
+            if _zdr(doc) and r.get("zdr") is not True:
+                bad.append(f"{p}: {mm['id']} would be served WITHOUT zdr (zero data retention)")
             for k in ("only", "order"):
                 want = (mm.get("hosts") or {}).get(k)
                 if want and r.get(k) != want:
@@ -636,6 +656,38 @@ def verify_profile(doc: dict, p: str, cfg: dict) -> List[str]:
         if mm.get("reasoning") and str(eff["reasoning_overrides"].get(mm["id"])) != str(mm["reasoning"]):
             bad.append(f"{p}: {mm['id']} reasoning pin missing (wants {mm['reasoning']})")
     return bad
+
+
+def zdr_seam_problems(root: Path) -> List[str]:
+    """policy.zdr is true on the wire only while the plugin's main-loop seam installs on this kernel: Hermes drops
+    `zdr` from its routing keys, and an upstream catch-up that renamed the helper would drop it silently, with Old
+    Mate's screenshot gate still open. Run by `verify` (so by pre-flight's "fleet models file"), in its own process:
+    the plugin is installed here and a stub OpenRouter agent must come back with zdr; a direct one must not."""
+    import importlib.util
+    import types
+    os.environ["HERMES_HOME"] = str(root)
+    os.environ.setdefault("HERMES_DISABLE_LAZY_INSTALLS", "1")          # no mid-run relaunch into another interpreter
+    try:
+        here = Path(__file__).resolve().parent
+        spec = importlib.util.spec_from_file_location("fleet_models_seam_check", here / "__init__.py",
+                                                      submodule_search_locations=[str(here)])
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.install()
+        from agent import chat_completion_helpers as cch
+        fn = cch._provider_preferences_for_agent
+        if not getattr(fn, "_fleet_models_wrapped", False):
+            return ["the plugin's main-loop zdr seam did not install on this kernel"]
+        stub = lambda prov, url: types.SimpleNamespace(  # noqa: E731
+            model="minimax/minimax-m3", provider=prov, base_url=url, providers_allowed=None, providers_ignored=None,
+            providers_order=None, provider_sort=None, provider_require_parameters=False, provider_data_collection="")
+        if fn(stub("openrouter", OR_BASE)).get("zdr") is not True:
+            return ["an OpenRouter main-loop request would go without zdr"]
+        if "zdr" in fn(stub("deepseek", DS_BASE)):
+            return ["zdr would be added to a non-OpenRouter request"]
+    except Exception as exc:  # noqa: BLE001
+        return [f"the zdr seam could not be checked: {exc}"]
+    return []
 
 
 # ── import: live configs -> doc (drift detection + the first write) ──────────────────────────
@@ -714,9 +766,23 @@ def soul_model_line(doc: dict, p: str) -> str:
         same = set(helpers.values())
         parts.append(("helpers " + next(iter(same))) if len(same) == 1 else
                      "helpers " + "; ".join(f"{t} {c}" for t, c in helpers.items()))
-    return (f"- **Model:** {' · '.join(parts)}. DeepSeek direct is metered and its cost is estimated from "
-            f"the rate card; OpenRouter calls are invoiced and always carry data_collection deny. "
+    return (f"- **Model:** {' · '.join(parts)}. {_billing_note(doc, p)} "
             f"Source: `~/.hermes/fleet/models.yaml` — changed only on the dashboard's Models tab. {SOUL_LINE}")
+
+
+def _billing_note(doc: dict, p: str) -> str:
+    """What kind of number this agent's spend is, for the providers it can actually land on (020: the line
+    named DeepSeek direct for weeks after it left every chain)."""
+    used = {(doc["models"].get(a) or {}).get("provider") for a in models_used(doc, p)}
+    notes = []
+    if "openrouter" in used:
+        floor = "data_collection deny and zero data retention (zdr)" if _zdr(doc) else "data_collection deny"
+        notes.append(f"OpenRouter calls are invoiced and always carry {floor}")
+    if "deepseek" in used:
+        notes.append("DeepSeek direct is metered and its cost is estimated from the rate card")
+    if "modelark" in used:
+        notes.append("ModelArk is a flat subscription, capped on cap-equivalent")
+    return "; ".join(notes) + "." if notes else ""
 
 
 def soul_table(doc: dict) -> str:
@@ -986,6 +1052,9 @@ def _main(argv: List[str]) -> int:
         for p in PROFILES:
             probs = verify_profile(doc, p, _load_plain(cfg_path(p, root)))
             print(f"{p:8} {'OK' if not probs else 'DRIFT'}"); [print("   ", x) for x in probs]; bad += bool(probs)
+        if _zdr(doc):
+            probs = zdr_seam_problems(root or fleet_root())
+            print(f"{'zdr-seam':8} {'OK' if not probs else 'DRIFT'}"); [print("   ", x) for x in probs]; bad += bool(probs)
         return 1 if bad else 0
     if cmd == "souls":
         doc = load_doc(root, fresh=True)

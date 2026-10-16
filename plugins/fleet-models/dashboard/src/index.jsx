@@ -38,7 +38,9 @@ const SLOT_LABEL = { main: "Main loop", subagents: "Subagents", cron: "Cron jobs
 const TASK_LABEL = { vision: "Vision", compression: "Compression", title_generation: "Titles",
   background_review: "Background review", goal_judge: "Goal judge", kanban_decomposer: "Decomposer",
   web_extract: "Web extract", session_search: "Session search", skills_hub: "Skills hub", approval: "Approval",
-  flush_memories: "Memory flush" };
+  flush_memories: "Memory flush", clean: "Clean", ask: "Ask", readback: "Readback" };
+// Spend that is in no profile ledger: an app's own (core: plugin_api._old_mate_rows), shown under its name.
+const sourceName = (doc, p) => (doc.agents[p] || {}).name || (APP_INFO[p] ? APP_INFO[p].name + " (app)" : p);
 
 // ── helpers ──────────────────────────────────────────────────────────────────────────────
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -1117,11 +1119,11 @@ function CostsView({ doc, usage, win, width, balances }) {
       <BalanceStats balances={balances} T={T} />
       <Section title="Over time" right={<span className="fm-muted fm-small">{bucketName(usage.bucket)} bars · tap or hover a bar</span>}>
         <TimeChart usage={usage} width={width} />
-        <p className="fm-muted fm-small fm-tc-foot">From all nine ledgers. Each session's usage is spread evenly between its first and last call, so short windows are close estimates. Faded bars are part-way through.</p>
+        <p className="fm-muted fm-small fm-tc-foot">From the nine fleet ledgers and Old Mate's own (its Clean, Ask and Readback calls on the fleet's OpenRouter key). Each session's usage is spread evenly between its first and last call, so short windows are close estimates. Faded bars are part-way through.</p>
       </Section>
       <div className="fm-two">
         <Section title={`Spend by agent · ${periodShort(win)}`} right={<span className="fm-muted fm-small">bar = billed $ · teal = subscription calls</span>}>
-          <BarList rows={Object.entries(byAgent).map(([p, rs]) => ({ label: (doc.agents[p] || {}).name || p,
+          <BarList rows={Object.entries(byAgent).map(([p, rs]) => ({ label: sourceName(doc, p),
             billed: rs.reduce((a, r) => a + r.billed_usd, 0), calls: rs.reduce((a, r) => a + r.calls, 0), ma: rs.reduce((a, r) => a + (r.modelark ? r.calls : 0), 0) }))} />
         </Section>
         <Section title={`Spend by model · ${periodShort(win)}`} right={<span className="fm-muted fm-small">old OpenRouter DeepSeek ids are history from before 09-11</span>}>
@@ -1135,7 +1137,7 @@ function CostsView({ doc, usage, win, width, balances }) {
             <tbody>
               {Object.entries(byAgent).map(([p, rs]) => rs.map((r, i) => (
                 <tr key={p + i}>
-                  <td>{i === 0 ? <b>{(doc.agents[p] || {}).name || p}</b> : null}</td>
+                  <td>{i === 0 ? <b>{sourceName(doc, p)}</b> : null}</td>
                   <td>{idToShort[r.model] || <code className="fm-code">{r.model}</code>}</td>
                   <td>{r.modelark
                     ? <span className="fm-prov fm-prov--modelark">modelark subscription</span>

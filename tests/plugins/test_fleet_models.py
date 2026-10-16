@@ -227,6 +227,50 @@ def test_app_slots_are_validated_and_change_no_config(core, fleet):
     assert any("old_mate.clean: unknown model" in e for e in core.validate(bad)[0])
 
 
+def test_zdr_policy_compiles_everywhere_and_verify_holds_it(core, fleet):
+    """2026-10-17 (Richie's no-train, no-retain rule): policy.zdr is written to every profile's flat routing and to
+    every OpenRouter aux task's floor; verify fails a config that lost it; the SOUL line says so and names no
+    provider the agent can't land on."""
+    doc = _signed_off(core, fleet)
+    for p in core.PROFILES:
+        doc["agents"][p]["main"] = doc["agents"][p]["subagents"] = ["v41-flash", "m3"]
+        doc["agents"][p]["aux"] = {"title_generation": ["v41-flash", "m3"], "vision": ["glm", "m3", "v41-flash"]}
+    errors, warnings = core.validate(doc)
+    assert not errors and any("policy.zdr is off" in w for w in warnings), "without zdr: a warning, not a block"
+    doc["policy"]["zdr"] = True
+    errors, warnings = core.validate(doc)
+    assert not errors and not any("policy.zdr" in w for w in warnings)
+    r = core.apply(doc, by="test", root=fleet, unlock=("root",))
+    assert r["ok"], r
+    live = core.load_doc(fleet, fresh=True)
+    for p in core.PROFILES:
+        cfg = yaml.safe_load(core.cfg_path(p, fleet).read_text())
+        assert cfg["provider_routing"]["zdr"] is True and cfg["provider_routing"]["data_collection"] == "deny"
+        assert cfg["auxiliary"]["vision"]["extra_body"]["provider"] == {"data_collection": "deny", "zdr": True}
+        assert core.verify_profile(live, p, cfg) == []
+        assert all(r.get("zdr") is True for r in core.effective(cfg)["routing"].values())
+        lost = copy.deepcopy(cfg); del lost["provider_routing"]["zdr"]
+        assert any("WITHOUT zdr" in b for b in core.verify_profile(live, p, lost)), "a config that lost zdr is drift"
+    assert json.loads((fleet / "fleet" / "models.json").read_text())["policy"]["zdr"] is True   # what Old Mate's gate reads
+    karl = (fleet / "profiles" / "karl" / "SOUL.md").read_text()
+    assert "data_collection deny and zero data retention (zdr)" in karl
+    assert "DeepSeek direct" not in karl and "ModelArk" not in karl, "020: no provider this agent can't land on"
+    bad = copy.deepcopy(live); bad["policy"]["zdr"] = "yes"
+    assert any("policy.zdr must be true or false" in e for e in core.validate(bad)[0])
+    off = copy.deepcopy(live); off["policy"]["zdr"] = False
+    r = core.apply(off, by="test", root=fleet, unlock=("root",))
+    assert r["ok"]
+    cfg = yaml.safe_load(core.cfg_path("karl", fleet).read_text())
+    assert "zdr" not in cfg["provider_routing"] and "zdr" not in cfg["auxiliary"]["vision"]["extra_body"]["provider"]
+
+
+def test_soul_line_names_deepseek_and_modelark_only_when_in_a_chain(core, fleet):
+    doc = _signed_off(core, fleet)                       # ModelArk first in every chain
+    line = core.soul_model_line(doc, "karl")
+    assert "ModelArk is a flat subscription" in line and "OpenRouter calls are invoiced" in line
+    assert "DeepSeek direct" not in line
+
+
 def test_hand_edit_is_reported_as_drift(core, fleet):
     assert core.apply(_signed_off(core, fleet), by="test", root=fleet, unlock=("root",))["ok"]
     f = core.cfg_path("karl", fleet)
@@ -238,8 +282,10 @@ def test_hand_edit_is_reported_as_drift(core, fleet):
 @pytest.fixture()
 def plugin(monkeypatch):
     from agent import auxiliary_client as ac
+    from agent import chat_completion_helpers as cch
     for name in ("_build_call_kwargs", "_call_fallback_candidate_sync", "_call_fallback_candidate_async"):
         monkeypatch.setattr(ac, name, getattr(ac, name))
+    monkeypatch.setattr(cch, "_provider_preferences_for_agent", cch._provider_preferences_for_agent)
     mod = _load(PLUGIN_DIR / "__init__.py", "fleet_models_under_test")
     return mod
 
@@ -317,6 +363,57 @@ def test_main_loop_and_pinned_child_get_v41_pins_and_deny(monkeypatch):
     assert "data_collection" not in _provider_preferences_for_agent(child)  # control: no entry, no deny
     assert resolve_reasoning_config(CFG, V41) == {"enabled": True, "effort": "high"}
     assert resolve_reasoning_config(CFG, "minimax/minimax-m3") == {"enabled": True, "effort": "low"}
+
+
+ZCFG = copy.deepcopy(CFG); ZCFG["provider_routing"]["zdr"] = True
+
+
+def _agent(model, provider="openrouter", base_url="https://openrouter.ai/api/v1"):
+    return types.SimpleNamespace(model=model, provider=provider, base_url=base_url, providers_allowed=None,
+                                 providers_ignored=None, providers_order=None, provider_sort=None,
+                                 provider_require_parameters=False, provider_data_collection="")
+
+
+def test_negative_control_main_loop_drops_zdr_without_plugin(monkeypatch):
+    """The gap: Hermes forwards six routing keys and drops `zdr` even when the config carries it."""
+    from hermes_cli import config as hc
+    from agent import chat_completion_helpers as cch
+    monkeypatch.setattr(hc, "load_config_readonly", lambda: ZCFG)
+    assert not getattr(cch._provider_preferences_for_agent, "_fleet_models_wrapped", False)
+    assert "zdr" not in cch._provider_preferences_for_agent(_agent(V41))
+
+
+def test_main_loop_and_aux_carry_zdr_with_the_plugin(plugin, monkeypatch):
+    from hermes_cli import config as hc
+    from agent import chat_completion_helpers as cch
+    from agent import auxiliary_client as ac
+    monkeypatch.setattr(hc, "load_config_readonly", lambda: ZCFG)
+    monkeypatch.setattr(ac, "_get_auxiliary_task_config", lambda task: {"model": "z-ai/glm-5.3-flash"})
+    done = plugin.install()
+    assert "main-loop zdr" in done and "aux routing" in done
+    assert "main-loop zdr" not in plugin.install(), "idempotent"
+    prefs = cch._provider_preferences_for_agent(_agent(V41))
+    assert prefs["zdr"] is True and prefs["only"] == HOSTS and prefs["data_collection"] == "deny"
+    child = _agent("some/other-model")                    # a pinned child, flat filters reset: zdr still rides
+    assert cch._provider_preferences_for_agent(child)["zdr"] is True
+    kw = _aux_kwargs("minimax/minimax-m3")
+    assert kw["extra_body"]["provider"] == {"data_collection": "deny", "zdr": True}
+    direct = _agent("deepseek-flash", provider="deepseek", base_url="https://api.deepseek.com")
+    assert "zdr" not in cch._provider_preferences_for_agent(direct), "an OpenRouter field never goes to a direct provider"
+    monkeypatch.setattr(hc, "load_config_readonly", lambda: CFG)        # policy off: nothing added
+    assert "zdr" not in cch._provider_preferences_for_agent(_agent(V41))
+    assert "zdr" not in _aux_kwargs("minimax/minimax-m3")["extra_body"]["provider"]
+
+
+def test_verify_proves_the_seam_on_this_kernel(core, plugin, tmp_path, monkeypatch):
+    """`core.py verify` (pre-flight's "fleet models file") fails if the main-loop seam can't add zdr here — the
+    guard against an upstream rename silently dropping it while Old Mate's gate trusts policy.zdr."""
+    from hermes_cli import config as hc
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(hc, "load_config_readonly", lambda: ZCFG)
+    assert core.zdr_seam_problems(tmp_path) == []
+    monkeypatch.setattr(hc, "load_config_readonly", lambda: CFG)
+    assert core.zdr_seam_problems(tmp_path) == ["an OpenRouter main-loop request would go without zdr"]
 
 
 def test_pricing_reads_cap_rates_from_the_fleet_file(tmp_path, monkeypatch):
@@ -434,6 +531,59 @@ def test_usage_spreads_long_rows_and_every_view_reconciles(api, tmp_path):
     assert karl["modelark"] and karl["billed_usd"] == 0 and karl["cap_equivalent_usd"] > 0
     assert u["bucket"] == 300 and 12 <= len(u["series"]) <= 13
     assert u["series"][-1]["partial"]
+
+
+def _old_mate(root, rows, v5=True):
+    import sqlite3
+    (root / "old-mate").mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(root / "old-mate" / "old-mate.db")
+    extra = ", billing TEXT NOT NULL DEFAULT '', hedged INTEGER NOT NULL DEFAULT 0" if v5 else ""
+    c.execute("CREATE TABLE actions (id INTEGER PRIMARY KEY, ts REAL, action TEXT, model TEXT, cost_usd REAL, "
+              f"tokens_in INT, tokens_out INT, readback_usd REAL NOT NULL DEFAULT 0{extra})")
+    for r in rows:
+        cols = ["ts", "action", "model", "cost_usd", "tokens_in", "tokens_out", "readback_usd"] + (["billing", "hedged"] if v5 else [])
+        vals = [r["ts"], r["action"], r.get("model", "minimax/minimax-m3"), r.get("cost", 0.0), r.get("tin", 100), r.get("tout", 20),
+                r.get("rb", 0.0)] + ([r.get("billing", "metered"), r.get("hedged", 0)] if v5 else [])
+        c.execute(f"INSERT INTO actions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", vals)
+    c.commit(); c.close()
+
+
+def test_usage_counts_old_mates_openrouter_spend_once(api, tmp_path):
+    """L34 (Old Mate review): Clean, Ask and Readback run on the fleet's OpenRouter key outside every profile ledger.
+    They join usage as `old_mate`; a Dispatch is left out (its card ran in a profile and is counted there), and so
+    is a Claude line (the Max plan)."""
+    N = NOW + 100
+    _ledger(tmp_path, "root", [{"calls": 10, "cost": 0.10, "fs": N - 600, "ls": N - 600}])
+    _old_mate(tmp_path, [
+        {"ts": N - 300, "action": "dictate", "cost": 0.0002},
+        {"ts": N - 290, "action": "dictate", "cost": 0.0005, "hedged": 1},                 # two requests, both billed
+        {"ts": N - 280, "action": "ask", "model": V41, "cost": 0.001, "rb": 0.004},       # an answer read back
+        {"ts": N - 270, "action": "readback", "model": "elevenlabs/eleven-flash-v2.5", "rb": 0.002, "tin": 0, "tout": 0},
+        {"ts": N - 265, "action": "readback", "model": "eleven_flash_v2_5", "rb": 0.003, "tin": 0, "tout": 0},  # S4 direct: not OpenRouter
+        {"ts": N - 260, "action": "dispatch", "model": "claude", "cost": 0.12, "billing": "plan"},
+        {"ts": N - 250, "action": "dispatch", "model": V41, "cost": 0.03},                 # a card: in its profile's ledger
+        {"ts": N - 9000, "action": "dictate", "cost": 9.0},                                 # outside the window
+    ])
+    u = api.usage(3600, bucket=300, tz="Pacific/Auckland", now=N, root=tmp_path)
+    om = [r for r in u["rows"] if r["profile"] == "old_mate"]
+    assert abs(sum(r["billed_usd"] for r in om) - (0.0002 + 0.0005 + 0.001 + 0.004 + 0.002)) < 1e-9
+    assert sum(r["calls"] for r in om) == 1 + 2 + 1 + 1 + 1
+    assert {r["task"] for r in om} == {"clean", "ask", "readback"}
+    assert all(r["invoiced"] is (r["task"] != "readback") for r in om), "speech is an estimate at list price (ADR-0009)"
+    assert abs(u["totals"]["invoiced_usd"] - (0.10 + 0.0017)) < 1e-9, "the fleet's invoiced total now matches the invoice"
+    assert abs(u["totals"]["estimated_usd"] - 0.006) < 1e-9
+    assert u["totals"]["by_payer"]["openrouter"]["invoiced"] is True
+    assert abs(sum(s["billed_usd"] for s in u["series"]) - u["totals"]["billed_usd"]) < 1e-9    # chart = tiles
+    assert abs(sum(u["by_profile"]["old_mate"]["billed"]) - 0.0077) < 1e-9
+    assert abs(api._provider_spend(tmp_path, 1e6)["openrouter"]["billed_usd"] - (0.10 + 0.0077 + 9.0)) < 1e-9, "runway counts it too"
+
+
+def test_usage_reads_an_old_mate_ledger_from_before_v5(api, tmp_path):
+    N = NOW + 100
+    _old_mate(tmp_path, [{"ts": N - 300, "action": "dictate", "cost": 0.0002},
+                         {"ts": N - 200, "action": "dispatch", "model": "claude", "cost": 0.5}], v5=False)
+    u = api.usage(3600, bucket=300, now=N, root=tmp_path)
+    assert [round(r["billed_usd"], 6) for r in u["rows"]] == [0.0002]
 
 
 def test_usage_buckets_follow_the_local_clock_across_dst(api, tmp_path):

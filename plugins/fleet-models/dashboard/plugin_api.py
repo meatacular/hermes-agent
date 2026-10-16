@@ -209,9 +209,45 @@ def _ledgers(root: Path):
     return [(n, p) for n, p in out if p.exists()]
 
 
+# Old Mate (Richie's dictation app) calls OpenRouter on the fleet's key for Clean, Ask and Readback; none of it is
+# in a profile ledger, so the fleet's spend undercounted the invoice (Old Mate review L34, 2026-10-17). Its own
+# Ledger is read here as one more source, under the app's name. A Dispatch line is left out: the card or one-shot
+# it started ran in a fleet profile and is already in that profile's ledger (and a Claude Dispatch is the Max plan).
+OLD_MATE = "old_mate"
+OLD_MATE_READBACK = "elevenlabs/eleven-flash-v2.5"
+OLD_MATE_ESTIMATE = "old-mate readback (estimated)"   # list price × characters: speech has no billed figure to read back
+OR_BASE = "https://openrouter.ai/api/v1"
+
+
+def _old_mate_rows(root: Path, since: float, now: float):
+    db = root / "old-mate" / "old-mate.db"
+    if not db.exists():
+        return
+    try:
+        c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(actions)")}
+        opt = lambda name, default: name if name in cols else default  # noqa: E731 — pre-v5 Ledgers lack billing/hedged
+        q = (f"SELECT ts, action, model, cost_usd, tokens_in, tokens_out, {opt('readback_usd', '0')}, "
+             f"{opt('billing', chr(39) * 2)}, {opt('hedged', '0')} FROM actions WHERE ts >= ? AND ts <= ?")
+        rows = c.execute(q, (since, now)).fetchall()
+        c.close()
+    except sqlite3.Error:
+        return
+    task_of = {"dictate": "clean", "ask": "ask"}
+    for ts, action, model, cost, tin, tout, rb, billing, hedged in rows:
+        if action in task_of and billing != "plan" and ((cost or 0) > 0 or (tin or 0) or (tout or 0)):
+            yield (OLD_MATE, model or "?", "", OR_BASE, task_of[action], "openrouter", 1 + (1 if hedged else 0),
+                   tin or 0, tout or 0, 0, 0, float(cost or 0), "old-mate", ts, ts)
+        if (rb or 0) > 0 and not (action == "readback" and model and not str(model).startswith("elevenlabs/")):
+            # (a standalone line with a bare ElevenLabs model id was S4's direct path, never on OpenRouter)
+            yield (OLD_MATE, (model if action == "readback" and model else OLD_MATE_READBACK), "", OR_BASE, "readback",
+                   "openrouter", 1, 0, 0, 0, 0, float(rb), OLD_MATE_ESTIMATE, ts, ts)
+
+
 def _usage_rows(root: Path, since: float, now: float):
     """(profile, model, host, base, task, billing_provider, calls, in, out, cache_read, cache_write,
-    cost, source, first, last)."""
+    cost, source, first, last). Old Mate's Ledger rides along as profile ``old_mate``."""
+    yield from _old_mate_rows(root, since, now)
     for prof, db in _ledgers(root):
         try:
             c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
@@ -314,9 +350,10 @@ def usage(window: int = 7 * 86400, bucket: Optional[int] = None, tz: Optional[st
             pass                 # a direct provider: deepseek, and anything added later
         elif payer == "openrouter" and not host:
             payer = "openrouter"
-        k = (prof, model, host or ("ModelArk" if ark else ""), task or "main", ark, payer)
+        est = src == OLD_MATE_ESTIMATE
+        k = (prof, model, host or ("ModelArk" if ark else ""), task or "main", ark, payer, est)
         a = agg.setdefault(k, {"profile": prof, "model": model, "host": k[2], "task": k[3], "modelark": ark,
-                               "payer": payer, "invoiced": payer == "openrouter", "calls": 0.0,
+                               "payer": payer, "invoiced": payer == "openrouter" and not est, "calls": 0.0,
                                "input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0,
                                "billed_usd": 0.0, "cap_equivalent_usd": 0.0})
         a["calls"] += calls * frac; a["input"] += inp * frac; a["output"] += out * frac
@@ -367,6 +404,7 @@ def usage(window: int = 7 * 86400, bucket: Optional[int] = None, tz: Optional[st
         py = by_payer.setdefault(r.get("payer") or "openrouter",
                                  {"calls": 0, "billed_usd": 0.0, "input": 0, "output": 0,
                                   "cache_read": 0, "invoiced": bool(r.get("invoiced"))})
+        py["invoiced"] = py["invoiced"] or bool(r.get("invoiced"))     # an estimated route in the bucket doesn't flip it
         py["calls"] += r["calls"]; py["billed_usd"] += r["billed_usd"]
         py["input"] += r["input"]; py["output"] += r["output"]; py["cache_read"] += r["cache_read"]
     for py in by_payer.values():
@@ -890,7 +928,12 @@ def _runtime_status() -> dict:
         aux = bool(getattr(ac._build_call_kwargs, "_fleet_models_wrapped", False))
     except Exception:  # noqa: BLE001
         aux = False
-    return {"aux_routing_seam": aux}
+    try:
+        from agent import chat_completion_helpers as cch
+        main = bool(getattr(cch._provider_preferences_for_agent, "_fleet_models_wrapped", False))
+    except Exception:  # noqa: BLE001
+        main = False
+    return {"aux_routing_seam": aux, "main_loop_zdr_seam": main}
 
 
 # ── routes ───────────────────────────────────────────────────────────────────────────────────
@@ -1085,9 +1128,14 @@ def post_probe(pb: Probe):
         if len(_PROBES) >= 30:
             raise HTTPException(429, "probe budget: 30 per hour")
         _PROBES.append(now)
+    prov = {"only": [pb.host], "allow_fallbacks": False, "data_collection": "deny"}
+    try:
+        if (_core().load_doc(_root()).get("policy") or {}).get("zdr") is True:
+            prov["zdr"] = True          # the fleet's requests carry it, so a host without ZDR must not probe healthy
+    except Exception:  # noqa: BLE001
+        pass
     body = {"model": pb.model, "messages": [{"role": "user", "content": "Reply with the single word OK."}],
-            "max_tokens": 64, "provider": {"only": [pb.host], "allow_fallbacks": False, "data_collection": "deny"},
-            "usage": {"include": True}}
+            "max_tokens": 64, "provider": prov, "usage": {"include": True}}
     req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", **_UA})
     t0 = time.time()
