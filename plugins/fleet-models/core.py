@@ -47,7 +47,8 @@ SLOTS = ("main", "subagents", "cron")
 # Apps outside the fleet that read their own chains ("app slots") from models.json at request time.
 # Nothing is compiled for them. Top-level key -> {slot: needs tool calling?}. Optional per-app keys:
 # `why` (prose) and `providers` (the providers its slots may use; default all).
-APPS = {"old_mate": {"clean": False, "ask": False}, "backupbrain": {"brainbot": True, "drafts": False}}
+APPS = {"old_mate": {"clean": False, "ask": False},
+        "backupbrain": {"brainbot": True, "drafts": False, "notes": False, "light": False}}
 APP_META = ("why", "providers")
 REASONING = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
