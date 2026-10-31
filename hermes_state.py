@@ -1673,6 +1673,43 @@ class SessionDB(
         # session's real surface: when this guard is the first writer the row must carry it,
         # or the turn lease treats the anonymous ``unknown`` placeholder as final.
         self._insert_session_row(session_id, source or "unknown", model=model)
+        # FLEET (catch-up 2026-10-31): the transaction body is ``_update_token_counts_in_transaction``,
+        # upstream's seam. The managed-worker RPC (hermes_state_runtime._worker_usage) calls that
+        # method directly, so the fleet attribution fields must live there, not only here.
+        values = dict(locals())
+        for k in ("self", "session_id", "source"):
+            values.pop(k)
+        self._execute_write(lambda conn: self._update_token_counts_in_transaction(conn, session_id, **values))
+
+    def _update_token_counts_in_transaction(
+        self,
+        conn,
+        session_id: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        model: str = None,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        estimated_cost_usd: Optional[float] = None,
+        actual_cost_usd: Optional[float] = None,
+        cost_status: Optional[str] = None,
+        cost_source: Optional[str] = None,
+        pricing_version: Optional[str] = None,
+        billing_provider: Optional[str] = None,
+        billing_base_url: Optional[str] = None,
+        billing_mode: Optional[str] = None,
+        api_call_count: int = 0,
+        absolute: bool = False,
+        provider_name: Optional[str] = None,
+        native_tokens_prompt: int = 0,
+        native_tokens_cached: int = 0,
+        cache_discount: float = 0.0,
+        total_cost: float = 0.0,
+        task: str = "",
+    ) -> None:
+        """Fleet override of the mixin's in-transaction writer: the same sessions UPDATE and
+        first-accounted-route logic, plus the fleet attribution fields into session_model_usage."""
         if absolute:
             sql = """UPDATE sessions SET
                    input_tokens = ?,
@@ -1758,84 +1795,82 @@ class SessionDB(
             or estimated_cost_usd
         )
 
-        def _do(conn):
-            row = conn.execute(
-                "SELECT model, billing_provider, api_call_count FROM sessions WHERE id = ?",
-                (session_id,),
-            ).fetchone()
-            existing_model = row["model"] if row is not None else None
-            existing_provider = row["billing_provider"] if row is not None else None
-            existing_api_calls = int((row["api_call_count"] if row is not None else 0) or 0)
+        row = conn.execute(
+            "SELECT model, billing_provider, api_call_count FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        existing_model = row["model"] if row is not None else None
+        existing_provider = row["billing_provider"] if row is not None else None
+        existing_api_calls = int((row["api_call_count"] if row is not None else 0) or 0)
 
-            # Session creation records the requested primary route before any API
-            # call. If it fails and fallback succeeds, the first accounted usage
-            # event is the first authoritative route. After that, preserve the
-            # legacy row: one row cannot represent mixed-provider usage.
-            # catch-up 20261009: upstream ``task`` (a per-turn route such as
-            # ``voice_chat``) counts in the totals but never becomes the session's route.
-            first_accounted_route = (
-                not task
-                and existing_api_calls == 0
-                and has_accounted_usage
-                and bool(model)
-                and bool(billing_provider)
-                and (existing_model != model or existing_provider != billing_provider)
+        # Session creation records the requested primary route before any API
+        # call. If it fails and fallback succeeds, the first accounted usage
+        # event is the first authoritative route. After that, preserve the
+        # legacy row: one row cannot represent mixed-provider usage.
+        # catch-up 20261009: upstream ``task`` (a per-turn route such as
+        # ``voice_chat``) counts in the totals but never becomes the session's route.
+        first_accounted_route = (
+            not task
+            and existing_api_calls == 0
+            and has_accounted_usage
+            and bool(model)
+            and bool(billing_provider)
+            and (existing_model != model or existing_provider != billing_provider)
+        )
+        if first_accounted_route:
+            conn.execute(
+                """UPDATE sessions
+                   SET model = ?, billing_provider = ?,
+                   billing_base_url = ?, billing_mode = ?
+                   WHERE id = ?""",
+                (model, billing_provider, billing_base_url, billing_mode, session_id),
             )
-            if first_accounted_route:
-                conn.execute(
-                    """UPDATE sessions
-                       SET model = ?, billing_provider = ?,
-                       billing_base_url = ?, billing_mode = ?
-                       WHERE id = ?""",
-                    (model, billing_provider, billing_base_url, billing_mode, session_id),
-                )
-            conn.execute(sql, params)
-            if record_model_usage:
-                self._record_model_usage(
-                    conn,
-                    session_id,
-                    model=model,
-                    billing_provider=billing_provider,
-                    billing_base_url=billing_base_url,
-                    billing_mode=billing_mode,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_write_tokens=cache_write_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                    estimated_cost_usd=estimated_cost_usd,
-                    actual_cost_usd=actual_cost_usd,
-                    cost_status=cost_status,
-                    cost_source=cost_source,
-                    api_call_count=api_call_count,
-                    task=task,
-                    provider_name=provider_name,
-                    native_tokens_prompt=native_tokens_prompt,
-                    native_tokens_cached=native_tokens_cached,
-                    cache_discount=cache_discount,
-                    total_cost=total_cost,
-                )
-        self._execute_write(_do)
+        conn.execute(sql, params)
+        if record_model_usage:
+            self._record_model_usage(
+                conn,
+                session_id,
+                model=model,
+                billing_provider=billing_provider,
+                billing_base_url=billing_base_url,
+                billing_mode=billing_mode,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+                reasoning_tokens=reasoning_tokens,
+                estimated_cost_usd=estimated_cost_usd,
+                actual_cost_usd=actual_cost_usd,
+                cost_status=cost_status,
+                cost_source=cost_source,
+                api_call_count=api_call_count,
+                task=task,
+                provider_name=provider_name,
+                native_tokens_prompt=native_tokens_prompt,
+                native_tokens_cached=native_tokens_cached,
+                cache_discount=cache_discount,
+                total_cost=total_cost,
+            )
 
     def _record_model_usage(
         self,
         conn,
         session_id: str,
         *,
-        model: Optional[str],
-        billing_provider: Optional[str],
-        billing_base_url: Optional[str],
-        billing_mode: Optional[str],
-        input_tokens: int,
-        output_tokens: int,
-        cache_read_tokens: int,
-        cache_write_tokens: int,
-        reasoning_tokens: int,
-        estimated_cost_usd: Optional[float],
-        actual_cost_usd: Optional[float],
-        cost_status: Optional[str],
-        cost_source: Optional[str],
-        api_call_count: int,
+        model: Optional[str] = None,
+        billing_provider: Optional[str] = None,
+        billing_base_url: Optional[str] = None,
+        billing_mode: Optional[str] = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        estimated_cost_usd: Optional[float] = None,
+        actual_cost_usd: Optional[float] = None,
+        cost_status: Optional[str] = None,
+        cost_source: Optional[str] = None,
+        api_call_count: int = 0,
         task: str = "",
         provider_name: Optional[str] = None,
         native_tokens_prompt: int = 0,
@@ -1979,12 +2014,22 @@ class SessionDB(
         """
         if not session_id or not task:
             return
-        # FK on session_model_usage.session_id → sessions.id: ensure the row
-        # exists (same INSERT OR IGNORE guard update_token_counts uses — the
-        # initial create_session() can fail under concurrent SQLite locking).
-        self._insert_session_row(session_id, "unknown")
+        # FK on session_model_usage.session_id → sessions.id. A missing row is inserted as
+        # ``unknown`` (the initial create_session() can fail under concurrent SQLite locking).
+        # An existing row keeps source and created_source, including a NULL surface
+        # update_token_counts can still fill; only a NULL profile_name is backfilled with this
+        # store's profile. (Upstream 599cd71c75, ported into the fleet override 2026-10-31.)
+        own_profile = None
+        if self._read_one("SELECT 1 FROM sessions WHERE id=?", (session_id,)) is None:
+            self._insert_session_row(session_id, "unknown")
+        else:
+            own_profile = self._own_profile_name()
 
         def _do(conn):
+            if own_profile:
+                conn.execute(
+                    "UPDATE sessions SET profile_name=? WHERE id=? AND profile_name IS NULL",
+                    (own_profile, session_id))
             self._record_model_usage(
                 conn,
                 session_id,

@@ -870,6 +870,9 @@ def _worker_turn(db, conn, session_id, payload, operation):
     return {'value': value}
 
 
+_FLEET_USAGE_EXTRAS = frozenset(('native_tokens_prompt', 'native_tokens_cached', 'cache_discount', 'total_cost'))
+
+
 def _worker_usage(db, conn, session_id, payload, *, auxiliary=False):
     from hermes_state_usage import _MODEL_USAGE_FIELDS, _TOKEN_COUNTERS
     source = None
@@ -883,11 +886,19 @@ def _worker_usage(db, conn, session_id, payload, *, auxiliary=False):
         source = raw if isinstance(raw, str) else None
         payload = {k: v for k, v in payload.items() if k != 'source'}
     allowed = (_MODEL_USAGE_FIELDS - {'billing_mode', 'actual_cost_usd', 'cost_status', 'cost_source'} | {'task'}) if auxiliary else (_MODEL_USAGE_FIELDS | {'pricing_version', 'absolute', 'task'})
+    # FLEET (catch-up 2026-10-31): the fleet's usage writers (agent/turn_usage, agent/aux_accounting)
+    # always send the four aggregator attribution fields of ``usage_attribution`` beside upstream's;
+    # without them in the allowlist every managed-worker usage write was refused as invalid_params,
+    # which also wedged the worker's persistence journal on that pending entry.
+    allowed = allowed | _FLEET_USAGE_EXTRAS
     if set(payload) - allowed:
         raise RuntimeStoreError('invalid_params')
     for key, value in payload.items():
-        if key in (*_TOKEN_COUNTERS, 'api_call_count'):
+        if key in (*_TOKEN_COUNTERS, 'api_call_count', 'native_tokens_prompt', 'native_tokens_cached'):
             valid = type(value) is int and 0 <= value <= 2**53
+        elif key in ('cache_discount', 'total_cost'):
+            # cache_discount is negative when a cache write costs more than it saves.
+            valid = type(value) in (int, float) and -1e12 <= value <= 1e12
         elif key in ('estimated_cost_usd', 'actual_cost_usd'):
             valid = value is None or (type(value) in (int, float) and 0 <= value <= 1e12)
         elif key == 'absolute':
