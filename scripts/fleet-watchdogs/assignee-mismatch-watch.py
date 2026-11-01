@@ -100,21 +100,21 @@ ALLOWED_CROSS_LANE = {
 # [triage] checked first: a "[triage] [Bob] X" card is a PM-parked card (jobsy),
 # NOT a build card, so the triage prefix must beat an inner [Profile] marker.
 TITLE_LANE_PREFIX = [
-    (re.compile(r"\[\s*triage\s*\]", re.I), "pm"),
-    (re.compile(r"\[\s*(?:bob|builder)\s*\]", re.I), "build"),
-    (re.compile(r"\[\s*rodge\s*\]", re.I), "review"),
-    (re.compile(r"\[\s*(?:steve-?o?|steveo)\s*\]", re.I), "verify"),
-    (re.compile(r"\[\s*karl\s*\]", re.I), "design"),
-    (re.compile(r"\[\s*jobsy\s*\]", re.I), "pm"),
+    (re.compile(r"\[\s*triage\s*\]", re.IGNORECASE), "pm"),
+    (re.compile(r"\[\s*(?:bob|builder)\s*\]", re.IGNORECASE), "build"),
+    (re.compile(r"\[\s*rodge\s*\]", re.IGNORECASE), "review"),
+    (re.compile(r"\[\s*(?:steve-?o?|steveo)\s*\]", re.IGNORECASE), "verify"),
+    (re.compile(r"\[\s*karl\s*\]", re.IGNORECASE), "design"),
+    (re.compile(r"\[\s*jobsy\s*\]", re.IGNORECASE), "pm"),
 ]
 
 # Lane verbs that are unambiguous -> lane. Build, review, verify, design, deploy.
 TITLE_LANE_VERB = [
-    (re.compile(r"^\s*(?:re-?review|review)\b", re.I), "review"),
-    (re.compile(r"^\s*(?:verify|qa\b|smoke|real-?click|re-?verify)\b", re.I), "verify"),
-    (re.compile(r"^\s*(?:design|specif|spec\b|decide|approve)\b", re.I), "design"),
-    (re.compile(r"^\s*(?:deploy|release)\b", re.I), "deploy"),
-    (re.compile(r"^\s*(?:implement|build\b|create\b|fix\b|repair|rework|integrate|land\b|viralize|align|port)\b", re.I), "build"),
+    (re.compile(r"^\s*(?:re-?review|review)\b", re.IGNORECASE), "review"),
+    (re.compile(r"^\s*(?:verify|qa\b|smoke|real-?click|re-?verify)\b", re.IGNORECASE), "verify"),
+    (re.compile(r"^\s*(?:design|specif|spec\b|decide|approve)\b", re.IGNORECASE), "design"),
+    (re.compile(r"^\s*(?:deploy|release)\b", re.IGNORECASE), "deploy"),
+    (re.compile(r"^\s*(?:implement|build\b|create\b|fix\b|repair|rework|integrate|land\b|viralize|align|port)\b", re.IGNORECASE), "build"),
 ]
 
 # Cards whose TITLE marks a liveness probe / cost-cap adjudication / PM re-scope.
@@ -123,12 +123,12 @@ TITLE_LANE_VERB = [
 # cost-cap" is steve-o's adjudication job (cost policy); "RE-SCOPE" is jobsy's PM
 # re-scoping action; "Approve extension under the cap" is the cost adjudicator.
 LEGIT_OWNER_TITLE = [
-    (re.compile(r"wire proof\s*:", re.I), None),          # matched via embedded profile name below
-    (re.compile(r"^\s*probe\b", re.I), None),
-    (re.compile(r"cost-?cap|adjudicat|approve extension|requeue under", re.I), "jobsy"),
-    (re.compile(r"re-?scope\b", re.I), "jobsy"),
-    (re.compile(r"wire\s+brain", re.I), "jobsy"),
-    (re.compile(r"pre-review-gate configuration|gate-?config adjudicat|commission search", re.I), "verify"),  # steve-o owns gate config
+    (re.compile(r"wire proof\s*:", re.IGNORECASE), None),          # matched via embedded profile name below
+    (re.compile(r"^\s*probe\b", re.IGNORECASE), None),
+    (re.compile(r"cost-?cap|adjudicat|approve extension|requeue under", re.IGNORECASE), "jobsy"),
+    (re.compile(r"re-?scope\b", re.IGNORECASE), "jobsy"),
+    (re.compile(r"wire\s+brain", re.IGNORECASE), "jobsy"),
+    (re.compile(r"pre-review-gate configuration|gate-?config adjudicat|commission search", re.IGNORECASE), "verify"),  # steve-o owns gate config
     # Decision/approval/sign-off gates — the auto-decomposer parks decision-shaped
     # children (approve the design/plan, decide, ratify, sign-off, approval gate)
     # on jobsy (triage) so a ghost PM-run cannot self-complete an unsigned call.
@@ -136,11 +136,11 @@ LEGIT_OWNER_TITLE = [
     # this a recovered auto-decomposer effective-assignee of jobsy would false-
     # flag them against a design/build lane. Mirrors kanban_decompose's
     # _DECISION_TITLE_RE routing.
-    (re.compile(r"approval gate|sign-?off|decision gate|approve (?:the|a|an) (?:design|plan|approach|spec|decision|model|schema|architecture|strategy|source)\b", re.I), "pm"),
+    (re.compile(r"approval gate|sign-?off|decision gate|approve (?:the|a|an) (?:design|plan|approach|spec|decision|model|schema|architecture|strategy|source)\b", re.IGNORECASE), "pm"),
 ]
 
 # Embedded profile name inside a 'Wire proof: <profile> turn' / liveness card.
-WIRE_PROOF_PROFILE = re.compile(r"wire proof\s*[:—-]\s*([a-z][a-z-]*)\s+turn", re.I)
+WIRE_PROOF_PROFILE = re.compile(r"wire proof\s*[:—-]\s*([a-z][a-z-]*)\s+turn", re.IGNORECASE)
 
 # Body markers that name the owner authoritatively (survive title verb ambiguities).
 BODY_OWNER_RE = re.compile(
@@ -211,7 +211,7 @@ def embedded_owner(title):
     for prof, pat in (("bob", r"^(?:\[bob\]|bob\s*[—-])"), ("rodge", r"^(?:\[rodge\]|rodge\s*[—-]|rodge review)"),
                       ("steve-o", r"^(?:\[steve-?o\]|steve-?o\s+[a-z-]+\b)"),
                       ("karl", r"^(?:\[karl\]|karl\s*[—-]|karl\s*:)")):
-        if re.match(pat, t, re.I):
+        if re.match(pat, t, re.IGNORECASE):
             return prof
     return None
 
@@ -508,8 +508,15 @@ def run(args):
         if acted:
             print(f"[routing-audit] reported {len(acted)} actionable mismatch(es) "
                   f"for Jobsy to re-route. Full table:\n{body}")
-        else:
-            print(body or "no actionable mismatches (all flags already done/archived/held)")
+        elif args.audit or args.gap:
+            # Explicit informational modes still print the table (and only then).
+            print(body or "[routing-audit] no mismatches in window")
+        # else: SILENT (change:watchdog-noise-20261102). The contract stated at
+        # the top of this file is "empty stdout = silent", and this runs as a
+        # cron job whose stdout is delivered verbatim to the operator's DM. A
+        # no-op line is therefore not harmless: it posted "no actionable
+        # mismatches" every 15 minutes, all night, saying nothing. Non-empty
+        # stdout must mean "a human needs to look at this".
         return body, acted
 
     con.close()
@@ -614,7 +621,7 @@ def run_selftest():
             con.execute("INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,?,?,?)",
                         (tid, kind, event_payload, now))
     con.commit()
-    flags, gaps = scan(con, 30)
+    flags, _gaps = scan(con, 30)
     flag_ids = {c["id"] for c in flags}
     for tid, _title, _assignee, _events, expect in lane_fixtures:
         if (tid in flag_ids) != expect:
@@ -655,7 +662,7 @@ def main(argv=None):
         print(msg)
         return 0 if ok else 1
 
-    body, acted = run(args)
+    body, _acted = run(args)
     if args.audit:
         print(body or "[routing-audit] no mismatches in window")
     return 0
